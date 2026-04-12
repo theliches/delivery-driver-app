@@ -1,0 +1,29 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Geocache: offentlig læsning; skriv kun strukturerede adressedata (begrænset størrelse).
+    match /addressCache/{docId} {
+      allow read: if true;
+
+      allow create, update: if request.resource.data.keys().hasAll(['address', 'lat', 'lng'])
+        && request.resource.data.keys().hasOnly(['address', 'lat', 'lng', 'createdAt'])
+        && request.resource.data.address is string
+        && request.resource.data.address.size() > 0
+        && request.resource.data.address.size() < 500
+        && request.resource.data.lat is number
+        && request.resource.data.lng is number
+        && request.resource.data.lat >= -90
+        && request.resource.data.lat <= 90
+        && request.resource.data.lng >= -180
+        && request.resource.data.lng <= 180;
+
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
