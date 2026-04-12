@@ -34,7 +34,9 @@ service cloud.firestore {
         && d.stops.size() >= 0
         && d.stops.size() <= 220
         && (!('activeStopId' in d) || d.activeStopId == null || d.activeStopId is string)
-        && d.updatedAt is timestamp;
+        && d.updatedAt is timestamp
+        && (!('routeName' in d) || (d.routeName is string && d.routeName.size() < 120))
+        && (!('routeDate' in d) || (d.routeDate is string && d.routeDate.size() == 10));
     }
 
     match /users/{userId}/routes/{routeId} {

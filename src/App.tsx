@@ -24,9 +24,13 @@ import { MAX_STOPS_PER_ROUTE } from "./routeConstants";
 import { ensureAnonUser, isFirestoreConfigured } from "./firebaseApp";
 import {
   fetchUserRoute,
+  fetchUserRouteSummaries,
+  formatDateTimeDdMmYyyyHm,
+  formatRouteDateDa,
   routeTitleFromStops,
   saveUserRoute,
   subscribeUserRouteSummaries,
+  todayIsoLocal,
   type SavedRouteSummary,
 } from "./routePersistenceFirestore";
 
@@ -43,6 +47,8 @@ type Persisted = {
   rawInput: string;
   stops: Stop[];
   activeId: string | null;
+  routeName?: string;
+  routeDate?: string;
 };
 
 function newId(): string {
@@ -147,6 +153,44 @@ function IconClose({ className }: { className?: string }) {
   );
 }
 
+function IconChevronUp({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M18 15l-6-6-6 6" />
+    </svg>
+  );
+}
+
+function IconChevronDown({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/i.test(navigator.userAgent);
 }
@@ -191,6 +235,9 @@ export default function App() {
   >(null);
   const [savedRoutes, setSavedRoutes] = useState<SavedRouteSummary[]>([]);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
+  const [routeName, setRouteName] = useState("");
+  const [routeDate, setRouteDate] = useState(() => todayIsoLocal());
+  const [routesRefreshing, setRoutesRefreshing] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -233,6 +280,12 @@ export default function App() {
         if (!cancelled && remote) {
           setRawInput(remote.rawInput);
           setStops(remote.stops as Stop[]);
+          setRouteName(remote.routeName ?? "");
+          setRouteDate(
+            remote.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(remote.routeDate)
+              ? remote.routeDate
+              : todayIsoLocal(),
+          );
           const nextActive =
             remote.activeStopId &&
             remote.stops.some((s) => s.id === remote.activeStopId)
@@ -256,6 +309,12 @@ export default function App() {
         setRawInput(p.rawInput ?? "");
         setStops(p.stops ?? []);
         setActiveId(p.activeId ?? null);
+        setRouteName(typeof p.routeName === "string" ? p.routeName : "");
+        setRouteDate(
+          p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
+            ? p.routeDate
+            : todayIsoLocal(),
+        );
       }
       if (!cancelled && user && !activeRid && p && (p.stops?.length ?? 0) > 0) {
         const st = p.stops ?? [];
@@ -266,6 +325,12 @@ export default function App() {
         const rid = newId();
         await saveUserRoute(user.uid, rid, {
           title: routeTitleFromStops(st),
+          routeName:
+            typeof p.routeName === "string" ? p.routeName : "",
+          routeDate:
+            p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
+              ? p.routeDate
+              : todayIsoLocal(),
           rawInput: p.rawInput ?? "",
           stops: st,
           activeStopId: aid,
@@ -293,8 +358,8 @@ export default function App() {
 
   useEffect(() => {
     if (!hydrated) return;
-    savePersisted({ rawInput, stops, activeId });
-  }, [hydrated, rawInput, stops, activeId]);
+    savePersisted({ rawInput, stops, activeId, routeName, routeDate });
+  }, [hydrated, rawInput, stops, activeId, routeName, routeDate]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -308,8 +373,14 @@ export default function App() {
   useEffect(() => {
     if (!hydrated || !firebaseUid || !activeFirestoreRouteId) return;
     const t = window.setTimeout(() => {
+      const rd =
+        routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+          ? routeDate
+          : todayIsoLocal();
       void saveUserRoute(firebaseUid, activeFirestoreRouteId, {
         title: routeTitleFromStops(stops),
+        routeName: routeName.trim(),
+        routeDate: rd,
         rawInput,
         stops,
         activeStopId: activeId,
@@ -323,6 +394,8 @@ export default function App() {
     rawInput,
     stops,
     activeId,
+    routeName,
+    routeDate,
   ]);
 
   useEffect(() => {
@@ -381,8 +454,14 @@ export default function App() {
       setActiveFirestoreRouteId(rid);
       const firstOpen =
         next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
+      const rd =
+        routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+          ? routeDate
+          : todayIsoLocal();
       void saveUserRoute(firebaseUid, rid, {
         title: routeTitleFromStops(next),
+        routeName: routeName.trim(),
+        routeDate: rd,
         rawInput,
         stops: next,
         activeStopId: firstOpen,
@@ -404,6 +483,12 @@ export default function App() {
       setOpenRouteDriveKm(null);
       setRawInput(data.rawInput);
       setStops(data.stops as Stop[]);
+      setRouteName(data.routeName ?? "");
+      setRouteDate(
+        data.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(data.routeDate)
+          ? data.routeDate
+          : todayIsoLocal(),
+      );
       const nextActive =
         data.activeStopId &&
         data.stops.some((s) => s.id === data.activeStopId)
@@ -425,11 +510,27 @@ export default function App() {
     setRawInput("");
     setStops([]);
     setActiveId(null);
+    setRouteName("");
+    setRouteDate(todayIsoLocal());
     setActiveFirestoreRouteId(null);
     localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
     localStorage.removeItem(LS_KEY);
     setMenuOpen(false);
   }, []);
+
+  const refreshSavedRoutes = useCallback(async () => {
+    if (!firebaseUid) return;
+    setRoutesRefreshing(true);
+    try {
+      const list = await fetchUserRouteSummaries(firebaseUid);
+      setSavedRoutes(list);
+      setCloudMessage(null);
+    } catch {
+      setCloudMessage("Kunne ikke genindlæse ruter — tjek nettet og prøv igen.");
+    } finally {
+      setRoutesRefreshing(false);
+    }
+  }, [firebaseUid]);
 
   const handleOptimize = async () => {
     if (stops.length === 0) return;
@@ -540,6 +641,8 @@ export default function App() {
     setRawInput("");
     setStops([]);
     setActiveId(null);
+    setRouteName("");
+    setRouteDate(todayIsoLocal());
     setActiveFirestoreRouteId(null);
     localStorage.removeItem(LS_KEY);
     localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
@@ -564,6 +667,23 @@ export default function App() {
   };
 
   const selectStop = (id: string) => setActiveId(id);
+
+  const moveStopInRoute = useCallback((stopId: string, direction: "up" | "down") => {
+    setOpenRouteDriveKm(null);
+    setStops((prev) => {
+      const incomplete = prev.filter((x) => !x.completed);
+      const complete = prev.filter((x) => x.completed);
+      const idx = incomplete.findIndex((x) => x.id === stopId);
+      if (idx < 0) return prev;
+      const j = direction === "up" ? idx - 1 : idx + 1;
+      if (j < 0 || j >= incomplete.length) return prev;
+      const nextIncomplete = incomplete.slice();
+      const t = nextIncomplete[idx];
+      nextIncomplete[idx] = nextIncomplete[j]!;
+      nextIncomplete[j] = t!;
+      return [...nextIncomplete, ...complete];
+    });
+  }, []);
 
   const zipOrder = useMemo(() => zipGroupOrder(stops), [stops]);
 
@@ -623,6 +743,17 @@ export default function App() {
           <p className="text-sm font-semibold leading-snug text-zinc-600 dark:text-zinc-300">
             {motivation}
           </p>
+          {stops.length > 0 ? (
+            <p className="text-sm font-bold leading-snug text-zinc-800 dark:text-zinc-100">
+              <span className="font-semibold text-zinc-500 dark:text-zinc-400">
+                Rute:
+              </span>{" "}
+              {routeName.trim() || "Uden navn"}
+              {routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+                ? ` · ${formatRouteDateDa(routeDate)}`
+                : ""}
+            </p>
+          ) : null}
         </div>
       </header>
 
@@ -714,6 +845,19 @@ export default function App() {
                     <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
                       Tidligere ruter
                     </p>
+                    <button
+                      type="button"
+                      disabled={routesRefreshing}
+                      onClick={() => void refreshSavedRoutes()}
+                      className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-2.5 text-left text-sm font-bold text-zinc-800 disabled:opacity-50 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-100"
+                    >
+                      {routesRefreshing
+                        ? "Henter ruter fra skyen…"
+                        : "Genindlæs ruter fra skyen"}
+                    </button>
+                    <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                      Tryk her hvis listen ser tom eller forkert ud.
+                    </p>
                     {savedRoutes.length === 0 ? (
                       <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
                         Ingen endnu — tryk «Indlæs adresser» for at oprette din første rute i skyen.
@@ -722,13 +866,14 @@ export default function App() {
                       <ul className="flex flex-col gap-2">
                         {savedRoutes.map((r) => {
                           const isActive = r.id === activeFirestoreRouteId;
+                          const headline =
+                            r.routeName.trim() || r.title || "Rute";
+                          const dateStr =
+                            r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
+                              ? formatRouteDateDa(r.routeDate)
+                              : null;
                           const when = r.updatedAt
-                            ? r.updatedAt.toLocaleString("da-DK", {
-                                day: "numeric",
-                                month: "short",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })
+                            ? formatDateTimeDdMmYyyyHm(r.updatedAt)
                             : "";
                           return (
                             <li key={r.id}>
@@ -743,7 +888,7 @@ export default function App() {
                               >
                                 <span className="flex items-center justify-between gap-2">
                                   <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
-                                    {r.title}
+                                    {headline}
                                   </span>
                                   {isActive ? (
                                     <span className="shrink-0 rounded-md bg-safety px-2 py-0.5 text-[10px] font-black uppercase text-black">
@@ -752,8 +897,9 @@ export default function App() {
                                   ) : null}
                                 </span>
                                 <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                                  {dateStr ? `${dateStr} · ` : ""}
                                   {r.stopCount} stop
-                                  {when ? ` · ${when}` : ""}
+                                  {when ? ` · opd. ${when}` : ""}
                                 </span>
                               </button>
                             </li>
@@ -777,7 +923,52 @@ export default function App() {
         <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
           Tryk på et stop (hele kortet) for at vælge · derefter{" "}
           <span className="font-bold text-safety">NAVIGÉR</span>
+          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge.
         </p>
+
+        {(stops.length > 0 || activeFirestoreRouteId != null) && (
+          <section className="flex flex-col gap-3 rounded-2xl border-2 border-zinc-300 bg-white px-3 py-3 shadow-sm dark:border-white/25 dark:bg-slate-800/70 dark:shadow-card">
+            <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Denne rute (hele dagen)
+            </p>
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
+                htmlFor="routeName"
+              >
+                Navn / overskrift
+              </label>
+              <input
+                id="routeName"
+                type="text"
+                value={routeName}
+                onChange={(e) => setRouteName(e.target.value)}
+                maxLength={100}
+                placeholder="Fx Roskilde vest · bud 2"
+                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder:text-zinc-400 focus:border-safety focus:outline-none focus:ring-2 focus:ring-safety/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
+                htmlFor="routeDate"
+              >
+                Rutedato (vises som dd-mm-yyyy)
+              </label>
+              <input
+                id="routeDate"
+                type="date"
+                value={routeDate}
+                onChange={(e) => setRouteDate(e.target.value)}
+                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 focus:border-safety focus:outline-none focus:ring-2 focus:ring-safety/40 dark:border-white/30 dark:bg-slate-900 dark:text-white"
+              />
+            </div>
+            <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
+              Vises i menu-listen og gemmes sammen med stop — ikke på de enkelte
+              adresser.
+            </p>
+          </section>
+        )}
 
         <section className="flex flex-col gap-2">
           <label
@@ -869,6 +1060,11 @@ export default function App() {
                   {list.map((s) => {
                     const isActive = s.id === activeId;
                     const step = routeStepById.get(s.id);
+                    const routePos = incompleteStops.findIndex((x) => x.id === s.id);
+                    const showReorder =
+                      step != null &&
+                      incompleteStops.length >= 2 &&
+                      routePos >= 0;
                     return (
                       <li
                         key={s.id}
@@ -922,6 +1118,33 @@ export default function App() {
                               </p>
                             </div>
                           </button>
+                          {showReorder ? (
+                            <div
+                              className="flex shrink-0 flex-col gap-0.5 self-center"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                aria-label="Flyt stop op i kørselsrækkefølgen"
+                                disabled={routePos <= 0}
+                                onClick={() => moveStopInRoute(s.id, "up")}
+                                className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                              >
+                                <IconChevronUp />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="Flyt stop ned i kørselsrækkefølgen"
+                                disabled={
+                                  routePos >= incompleteStops.length - 1
+                                }
+                                onClick={() => moveStopInRoute(s.id, "down")}
+                                className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                              >
+                                <IconChevronDown />
+                              </button>
+                            </div>
+                          ) : null}
                           <button
                             type="button"
                             onClick={(e) => void copyOneAddress(e, s)}
