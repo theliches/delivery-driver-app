@@ -37,7 +37,34 @@ import {
 
 const LS_KEY = "delivery-driver-route-v1";
 const THEME_KEY = "delivery-driver-theme";
+const ACCENT_KEY = "delivery-driver-accent";
 const ACTIVE_FIREBASE_ROUTE_LS = "delivery-driver-firebase-active-route-id";
+
+type AccentId = "orange" | "red" | "green" | "blue";
+
+const ACCENT_PRESETS: Record<
+  AccentId,
+  { label: string; main: string; deep: string }
+> = {
+  orange: { label: "Orange", main: "#FF6B35", deep: "#E85A24" },
+  /** Afdæmpet R — ikke neon */
+  red: { label: "Rød", main: "#C45C5C", deep: "#9E4545" },
+  /** Afdæmpet G — skovgrøn */
+  green: { label: "Grøn", main: "#2F8F6B", deep: "#247A5A" },
+  /** Afdæmpet B — stålblå */
+  blue: { label: "Blå", main: "#4580C4", deep: "#35649A" },
+};
+
+function hexToRgbTriplet(hex: string): string {
+  const n = hex.replace("#", "");
+  const r = Number.parseInt(n.slice(0, 2), 16);
+  const g = Number.parseInt(n.slice(2, 4), 16);
+  const b = Number.parseInt(n.slice(4, 6), 16);
+  if ([r, g, b].some((x) => Number.isNaN(x))) return "255 107 53";
+  return `${r} ${g} ${b}`;
+}
+
+type CloudSyncPhase = "idle" | "pending" | "syncing" | "synced" | "error";
 
 type Stop = ParsedAddress & {
   id: string;
@@ -154,6 +181,25 @@ function IconClose({ className }: { className?: string }) {
   );
 }
 
+function IconArrowLeft({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="22"
+      height="22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M15 18l-6-6 6-6" />
+    </svg>
+  );
+}
+
 function IconChevronUp({ className }: { className?: string }) {
   return (
     <svg
@@ -239,6 +285,7 @@ export default function App() {
   const [routeName, setRouteName] = useState("");
   const [routeDate, setRouteDate] = useState(() => todayIsoLocal());
   const [routesRefreshing, setRoutesRefreshing] = useState(false);
+  const [screen, setScreen] = useState<"home" | "editor">("home");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -249,6 +296,20 @@ export default function App() {
     return "dark";
   });
 
+  const [accentId, setAccentId] = useState<AccentId>(() => {
+    try {
+      const a = localStorage.getItem(ACCENT_KEY);
+      if (a === "orange" || a === "red" || a === "green" || a === "blue")
+        return a;
+    } catch {
+      /* ignore */
+    }
+    return "orange";
+  });
+
+  const [cloudSyncPhase, setCloudSyncPhase] =
+    useState<CloudSyncPhase>("idle");
+
   useLayoutEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     try {
@@ -257,6 +318,18 @@ export default function App() {
       /* ignore */
     }
   }, [theme]);
+
+  useLayoutEffect(() => {
+    const p = ACCENT_PRESETS[accentId];
+    const root = document.documentElement;
+    root.style.setProperty("--accent-rgb", hexToRgbTriplet(p.main));
+    root.style.setProperty("--accent-deep-rgb", hexToRgbTriplet(p.deep));
+    try {
+      localStorage.setItem(ACCENT_KEY, accentId);
+    } catch {
+      /* ignore */
+    }
+  }, [accentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,6 +370,7 @@ export default function App() {
           setActiveId(nextActive);
           setActiveFirestoreRouteId(activeRid);
           setHydrated(true);
+          setScreen("home");
           return;
         }
         if (!cancelled) {
@@ -338,7 +412,10 @@ export default function App() {
         });
         if (!cancelled) setActiveFirestoreRouteId(rid);
       }
-      if (!cancelled) setHydrated(true);
+      if (!cancelled) {
+        setHydrated(true);
+        setScreen("home");
+      }
     })();
     return () => {
       cancelled = true;
@@ -372,21 +449,29 @@ export default function App() {
   }, [hydrated, activeFirestoreRouteId]);
 
   useEffect(() => {
-    if (!hydrated || !firebaseUid || !activeFirestoreRouteId) return;
+    if (!hydrated || !firebaseUid || !activeFirestoreRouteId) {
+      setCloudSyncPhase("idle");
+      return;
+    }
+    setCloudSyncPhase("pending");
     const t = window.setTimeout(() => {
-      const rd =
-        routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
-          ? routeDate
-          : todayIsoLocal();
-      void saveUserRoute(firebaseUid, activeFirestoreRouteId, {
-        title: routeTitleFromStops(stops),
-        routeName: routeName.trim(),
-        routeDate: rd,
-        rawInput,
-        stops,
-        activeStopId: activeId,
-      });
-    }, 1400);
+      void (async () => {
+        setCloudSyncPhase("syncing");
+        const rd =
+          routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+            ? routeDate
+            : todayIsoLocal();
+        const ok = await saveUserRoute(firebaseUid, activeFirestoreRouteId, {
+          title: routeTitleFromStops(stops),
+          routeName: routeName.trim(),
+          routeDate: rd,
+          rawInput,
+          stops,
+          activeStopId: activeId,
+        });
+        setCloudSyncPhase(ok ? "synced" : "error");
+      })();
+    }, 900);
     return () => window.clearTimeout(t);
   }, [
     hydrated,
@@ -536,9 +621,15 @@ export default function App() {
       setActiveId(nextActive);
       setActiveFirestoreRouteId(routeId);
       setMenuOpen(false);
+      setScreen("editor");
     },
     [firebaseUid],
   );
+
+  const goHome = useCallback(() => {
+    setMenuOpen(false);
+    setScreen("home");
+  }, []);
 
   const startNewActiveRoute = useCallback(() => {
     setCopiedStopId(null);
@@ -554,6 +645,11 @@ export default function App() {
     localStorage.removeItem(LS_KEY);
     setMenuOpen(false);
   }, []);
+
+  const goToCreateNewRoute = useCallback(() => {
+    startNewActiveRoute();
+    setScreen("editor");
+  }, [startNewActiveRoute]);
 
   const refreshSavedRoutes = useCallback(async () => {
     if (!firebaseUid) return;
@@ -757,44 +853,164 @@ export default function App() {
     return m;
   }, [incompleteStops]);
 
+  const cloudSyncBanner = useMemo(() => {
+    if (!hydrated) return null;
+    if (!isFirestoreConfigured()) {
+      return (
+        <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-500">
+          Sky ikke konfigureret — gemmes kun på denne enhed.
+        </p>
+      );
+    }
+    if (!firebaseUid) {
+      return (
+        <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">
+          Forbinder til skyen…
+        </p>
+      );
+    }
+    if (!activeFirestoreRouteId) {
+      return (
+        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+          Sky-gem starter, når du har trykket «Indlæs adresser» mindst én gang.
+        </p>
+      );
+    }
+    switch (cloudSyncPhase) {
+      case "idle":
+        return null;
+      case "pending":
+        return (
+          <p
+            className="text-xs font-bold text-amber-800 dark:text-amber-200"
+            role="status"
+          >
+            Venter på gem… synkroniserer om et øjeblik
+          </p>
+        );
+      case "syncing":
+        return (
+          <p
+            className="text-xs font-bold text-sky-800 dark:text-sky-200"
+            role="status"
+          >
+            Gemmer i skyen…
+          </p>
+        );
+      case "synced":
+        return (
+          <p
+            className="text-xs font-bold text-emerald-800 dark:text-emerald-200"
+            role="status"
+          >
+            Synkroniseret med skyen
+          </p>
+        );
+      case "error":
+        return (
+          <p
+            className="text-xs font-bold text-red-700 dark:text-red-300"
+            role="alert"
+          >
+            Kunne ikke gemme — tjek nettet og prøv igen
+          </p>
+        );
+      default:
+        return null;
+    }
+  }, [
+    hydrated,
+    firebaseUid,
+    activeFirestoreRouteId,
+    cloudSyncPhase,
+  ]);
+
   return (
     <div className="flex min-h-full flex-col bg-zinc-100 text-zinc-900 dark:bg-[#070d14] dark:text-white">
-      <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
-        <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-3">
-          <div className="flex items-start justify-between gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-zinc-900 dark:text-white">
-              Leveringschauffør
-            </h1>
-            <button
-              type="button"
-              aria-expanded={menuOpen}
-              aria-controls="app-drawer-menu"
-              onClick={() => setMenuOpen((o) => !o)}
-              className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
-            >
-              <span className="sr-only">Menu</span>
-              <IconMenu />
-            </button>
+      {screen === "home" ? (
+        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+          <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h1 className="text-xl font-extrabold tracking-tight text-zinc-900 dark:text-white">
+                  Leveringschauffør
+                </h1>
+                <p className="mt-1 text-sm font-semibold text-zinc-600 dark:text-zinc-400">
+                  Forside — vælg gemt rute eller opret ny
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-expanded={menuOpen}
+                aria-controls="app-drawer-menu"
+                onClick={() => setMenuOpen((o) => !o)}
+                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+              >
+                <span className="sr-only">Menu</span>
+                <IconMenu />
+              </button>
+            </div>
           </div>
-          <p className="text-base font-black text-safety dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
-            TOTAL: {completedCount} / {total} pakker
-          </p>
-          <p className="text-sm font-semibold leading-snug text-zinc-600 dark:text-zinc-300">
-            {motivation}
-          </p>
-          {stops.length > 0 ? (
-            <p className="text-sm font-bold leading-snug text-zinc-800 dark:text-zinc-100">
-              <span className="font-semibold text-zinc-500 dark:text-zinc-400">
-                Rute:
-              </span>{" "}
-              {routeName.trim() || "Uden navn"}
-              {routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
-                ? ` · ${formatRouteDateDa(routeDate)}`
-                : ""}
+        </header>
+      ) : (
+        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+          <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-3">
+            <div className="flex items-start gap-2">
+              <button
+                type="button"
+                onClick={goHome}
+                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                aria-label="Tilbage til forsiden"
+              >
+                <IconArrowLeft />
+              </button>
+              <div className="min-w-0 flex-1">
+                <h1 className="text-lg font-extrabold leading-tight text-zinc-900 dark:text-white">
+                  {activeFirestoreRouteId ? "Rediger rute" : "Opret ny rute"}
+                </h1>
+                <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                  Gemmes automatisk i skyen · forsiden viser alle ruter
+                </p>
+                {cloudSyncBanner ? (
+                  <div
+                    className="mt-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 dark:border-white/15 dark:bg-slate-900/80"
+                    aria-live="polite"
+                  >
+                    {cloudSyncBanner}
+                  </div>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                aria-expanded={menuOpen}
+                aria-controls="app-drawer-menu"
+                onClick={() => setMenuOpen((o) => !o)}
+                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+              >
+                <span className="sr-only">Menu</span>
+                <IconMenu />
+              </button>
+            </div>
+            <p className="text-base font-black text-accent dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+              TOTAL: {completedCount} / {total} pakker
             </p>
-          ) : null}
-        </div>
-      </header>
+            <p className="text-sm font-semibold leading-snug text-zinc-600 dark:text-zinc-300">
+              {motivation}
+            </p>
+            {stops.length > 0 ? (
+              <p className="text-sm font-bold leading-snug text-zinc-800 dark:text-zinc-100">
+                <span className="font-semibold text-zinc-500 dark:text-zinc-400">
+                  Rute:
+                </span>{" "}
+                {routeName.trim() || "Uden navn"}
+                {routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+                  ? ` · ${formatRouteDateDa(routeDate)}`
+                  : ""}
+              </p>
+            ) : null}
+          </div>
+        </header>
+      )}
 
       {menuOpen ? (
         <div
@@ -849,6 +1065,41 @@ export default function App() {
                 )}
               </button>
 
+              <div className="flex flex-col gap-2">
+                <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
+                  Accentfarve (knapper &amp; markering)
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(Object.keys(ACCENT_PRESETS) as AccentId[]).map((id) => {
+                    const preset = ACCENT_PRESETS[id];
+                    const selected = accentId === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setAccentId(id)}
+                        aria-pressed={selected}
+                        className={`flex items-center gap-2 rounded-xl border-2 px-3 py-2.5 text-left text-sm font-extrabold transition ${
+                          selected
+                            ? "border-accent bg-accent/15 ring-2 ring-accent/35 dark:bg-accent/10"
+                            : "border-zinc-300 bg-zinc-50 dark:border-white/30 dark:bg-slate-800"
+                        } text-zinc-900 dark:text-white`}
+                      >
+                        <span
+                          className="size-5 shrink-0 rounded-full border-2 border-black/20 dark:border-white/25"
+                          style={{ backgroundColor: preset.main }}
+                          aria-hidden
+                        />
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                  Rød, grøn og blå er dæmpede nuancer — ikke skarpe neontoner.
+                </p>
+              </div>
+
               {!isFirestoreConfigured() ? (
                 <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
                   Sæt <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">VITE_FIREBASE_*</code>{" "}
@@ -862,94 +1113,60 @@ export default function App() {
                 </p>
               ) : null}
 
+              {screen === "editor" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    goHome();
+                  }}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-3 text-left text-sm font-extrabold text-zinc-900 dark:border-white/30 dark:bg-slate-800 dark:text-white"
+                >
+                  Forside
+                </button>
+              ) : (
+                <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                  Dine gemte ruter vises på forsiden. Brug «Opret ny rute» der.
+                </p>
+              )}
+
               {firebaseUid ? (
                 <>
-                  <div className="flex flex-col gap-2">
-                    <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
-                      Dagens rute
-                    </p>
-                    <button
-                      type="button"
-                      onClick={startNewActiveRoute}
-                      className="touch-manipulation rounded-xl border-2 border-safety bg-safety/90 px-4 py-3 text-left text-sm font-extrabold text-black dark:border-safety dark:bg-safety/80"
-                    >
-                      Ny aktiv rute (ny dag)
-                    </button>
-                    <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-                      Tømmer skærmen og starter forfra. Gamle ruter bliver i listen — vælg én nedenfor hvis du vil fortsætte en tidligere.
-                    </p>
-                  </div>
+                  <button
+                    type="button"
+                    disabled={routesRefreshing}
+                    onClick={() => void refreshSavedRoutes()}
+                    className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-2.5 text-left text-sm font-bold text-zinc-800 disabled:opacity-50 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-100"
+                  >
+                    {routesRefreshing
+                      ? "Henter ruter fra skyen…"
+                      : "Genindlæs ruter fra skyen"}
+                  </button>
+                  <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                    Opdaterer listen på forsiden (live + manuelt).
+                  </p>
 
-                  <div className="flex flex-col gap-2">
-                    <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
-                      Tidligere ruter
-                    </p>
-                    <button
-                      type="button"
-                      disabled={routesRefreshing}
-                      onClick={() => void refreshSavedRoutes()}
-                      className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-2.5 text-left text-sm font-bold text-zinc-800 disabled:opacity-50 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-100"
-                    >
-                      {routesRefreshing
-                        ? "Henter ruter fra skyen…"
-                        : "Genindlæs ruter fra skyen"}
-                    </button>
-                    <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-                      Tryk her hvis listen ser tom eller forkert ud.
-                    </p>
-                    {savedRoutes.length === 0 ? (
-                      <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
-                        Ingen endnu — tryk «Indlæs adresser» (første gang) eller «Som ny rute
-                        i sky-listen» for en ekstra linje. Hvis du kun har trykket «Indlæs»
-                        gentagne gange, er det den samme rute der opdateres. Tryk også «Genindlæs
-                        ruter» hvis listen ser forkert ud.
+                  {screen === "editor" ? (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
+                        Start forfra
                       </p>
-                    ) : (
-                      <ul className="flex flex-col gap-2">
-                        {savedRoutes.map((r) => {
-                          const isActive = r.id === activeFirestoreRouteId;
-                          const headline =
-                            r.routeName.trim() || r.title || "Rute";
-                          const dateStr =
-                            r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
-                              ? formatRouteDateDa(r.routeDate)
-                              : null;
-                          const when = r.updatedAt
-                            ? formatDateTimeDdMmYyyyHm(r.updatedAt)
-                            : "";
-                          return (
-                            <li key={r.id}>
-                              <button
-                                type="button"
-                                onClick={() => void loadSavedRouteIntoApp(r.id)}
-                                className={`flex w-full touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
-                                  isActive
-                                    ? "border-safety bg-safety/15 dark:bg-safety/10"
-                                    : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
-                                }`}
-                              >
-                                <span className="flex items-center justify-between gap-2">
-                                  <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
-                                    {headline}
-                                  </span>
-                                  {isActive ? (
-                                    <span className="shrink-0 rounded-md bg-safety px-2 py-0.5 text-[10px] font-black uppercase text-black">
-                                      Aktiv
-                                    </span>
-                                  ) : null}
-                                </span>
-                                <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                                  {dateStr ? `${dateStr} · ` : ""}
-                                  {r.stopCount} stop
-                                  {when ? ` · opd. ${when}` : ""}
-                                </span>
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMenuOpen(false);
+                          startNewActiveRoute();
+                          setScreen("editor");
+                        }}
+                        className="touch-manipulation rounded-xl border-2 border-accent bg-accent/90 px-4 py-3 text-left text-sm font-extrabold text-black dark:border-accent dark:bg-accent/80"
+                      >
+                        Ny aktiv rute (tøm skærm)
+                      </button>
+                      <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                        Gemte ruter i skyen påvirkes ikke — find dem på forsiden.
+                      </p>
+                    </div>
+                  ) : null}
                 </>
               ) : isFirestoreConfigured() ? (
                 <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
@@ -961,10 +1178,134 @@ export default function App() {
         </div>
       ) : null}
 
+      {screen === "home" ? (
+        <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-5 px-4 pb-12 pt-5">
+          {cloudMessage ? (
+            <p className="rounded-xl border-2 border-amber-400/80 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100">
+              {cloudMessage}
+            </p>
+          ) : null}
+          <p className="text-center text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
+            Ændringer gemmes <span className="font-semibold">automatisk i skyen</span> kort
+            efter du har indlæst adresser — du behøver ikke en «gem»-knap.
+          </p>
+          {cloudSyncBanner ? (
+            <div
+              className="rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-white/20 dark:bg-slate-800/80"
+              aria-live="polite"
+            >
+              {cloudSyncBanner}
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={goToCreateNewRoute}
+            className="min-h-[58px] w-full touch-manipulation rounded-2xl border-2 border-accentDeep bg-accent px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] dark:shadow-card"
+          >
+            Opret ny rute
+          </button>
+          {stops.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setScreen("editor")}
+              className="min-h-[52px] w-full touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+            >
+              Fortsæt seneste rute ({stops.length} stop)
+            </button>
+          ) : null}
+
+          <section className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Dine gemte ruter
+              </p>
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
+                Listen opdateres automatisk når du redigerer. Tryk på en rute for at åbne
+                den.
+              </p>
+            </div>
+            {firebaseUid ? (
+              <>
+                <button
+                  type="button"
+                  disabled={routesRefreshing}
+                  onClick={() => void refreshSavedRoutes()}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-2.5 text-left text-sm font-bold text-zinc-800 disabled:opacity-50 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-100"
+                >
+                  {routesRefreshing
+                    ? "Henter ruter fra skyen…"
+                    : "Genindlæs ruter fra skyen"}
+                </button>
+                {savedRoutes.length === 0 ? (
+                  <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
+                    Ingen endnu — tryk «Opret ny rute», indsæt adresser og «Indlæs adresser».
+                    Flere ruter: brug «Som ny rute i sky-listen» under tekstfeltet, eller
+                    opret flere fra forsiden med «Opret ny rute» hver gang.
+                  </p>
+                ) : (
+                  <ul className="flex flex-col gap-2">
+                    {savedRoutes.map((r) => {
+                      const isActive = r.id === activeFirestoreRouteId;
+                      const headline =
+                        r.routeName.trim() || r.title || "Rute";
+                      const dateStr =
+                        r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
+                          ? formatRouteDateDa(r.routeDate)
+                          : null;
+                      const when = r.updatedAt
+                        ? formatDateTimeDdMmYyyyHm(r.updatedAt)
+                        : "";
+                      return (
+                        <li key={r.id}>
+                          <button
+                            type="button"
+                            onClick={() => void loadSavedRouteIntoApp(r.id)}
+                            className={`flex w-full touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
+                              isActive
+                                ? "border-accent bg-accent/15 dark:bg-accent/10"
+                                : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
+                            }`}
+                          >
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
+                                {headline}
+                              </span>
+                              {isActive ? (
+                                <span className="shrink-0 rounded-md bg-accent px-2 py-0.5 text-[10px] font-black uppercase text-black">
+                                  Aktiv
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                              {dateStr ? `${dateStr} · ` : ""}
+                              {r.stopCount} stop
+                              {when ? ` · opd. ${when}` : ""}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </>
+            ) : isFirestoreConfigured() ? (
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                Forbinder til skyen… genindlæs siden hvis listen ikke kommer.
+              </p>
+            ) : (
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                Uden Firebase gemmes kun på denne enhed.
+              </p>
+            )}
+          </section>
+        </main>
+      ) : null}
+
+      {screen === "editor" ? (
       <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 px-4 pb-36 pt-4">
         <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
           Tryk på et stop (hele kortet) for at vælge · derefter{" "}
-          <span className="font-bold text-safety">NAVIGÉR</span>
+          <span className="font-bold text-accent">NAVIGÉR</span>
           . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge.
         </p>
 
@@ -987,7 +1328,7 @@ export default function App() {
                 onChange={(e) => setRouteName(e.target.value)}
                 maxLength={100}
                 placeholder="Fx Roskilde vest · bud 2"
-                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder:text-zinc-400 focus:border-safety focus:outline-none focus:ring-2 focus:ring-safety/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500"
+                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 placeholder:text-zinc-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500"
               />
             </div>
             <div className="flex flex-col gap-1">
@@ -1002,11 +1343,11 @@ export default function App() {
                 type="date"
                 value={routeDate}
                 onChange={(e) => setRouteDate(e.target.value)}
-                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 focus:border-safety focus:outline-none focus:ring-2 focus:ring-safety/40 dark:border-white/30 dark:bg-slate-900 dark:text-white"
+                className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 dark:border-white/30 dark:bg-slate-900 dark:text-white"
               />
             </div>
             <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
-              Vises i menu-listen og gemmes sammen med stop — ikke på de enkelte
+              Vises på forsiden og gemmes sammen med stop — ikke på de enkelte
               adresser.
             </p>
           </section>
@@ -1025,7 +1366,7 @@ export default function App() {
             value={rawInput}
             onChange={(e) => setRawInput(e.target.value)}
             rows={6}
-            className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-3 text-base text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:border-safety focus:outline-none focus:ring-2 focus:ring-safety/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500 dark:shadow-card"
+            className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-3 text-base text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500 dark:shadow-card"
             placeholder={
               "1. Nørregade 15, 4000 Roskilde\n2. Hovedgaden 2, 5000 Odense"
             }
@@ -1035,7 +1376,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleParse}
-              className="min-h-[60px] flex-1 touch-manipulation rounded-xl border-2 border-zinc-400 bg-safety px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] active:bg-safetyDeep dark:border-white/40 dark:shadow-card"
+              className="min-h-[60px] flex-1 touch-manipulation rounded-xl border-2 border-zinc-400 bg-accent px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] active:bg-accentDeep dark:border-white/40 dark:shadow-card"
             >
               Indlæs adresser
             </button>
@@ -1059,14 +1400,14 @@ export default function App() {
             type="button"
             onClick={handleParseAsNewCloudRoute}
             disabled={!rawInput.trim()}
-            title="Opretter en ny linje under «Tidligere ruter» i menuen (samme tekst som nu er ok)."
+            title="Opretter en ny rute på forsiden (samme tekst som nu er ok)."
             className="w-full touch-manipulation rounded-xl border-2 border-dashed border-zinc-400 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800/80 dark:text-zinc-100"
           >
             Som ny rute i sky-listen
           </button>
           <p className="text-center text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
             «Indlæs adresser» opdaterer den <span className="font-semibold">aktive</span>{" "}
-            sky-rute. Brug knappen herover for hver ekstra linje i menuen (fx samme liste
+            sky-rute. Brug knappen herover for en ekstra linje på forsiden (fx samme liste
             som ny tur).
           </p>
           <p className="text-center text-xs text-zinc-500 dark:text-zinc-500">
@@ -1087,7 +1428,7 @@ export default function App() {
           )}
           {routeOptimizeFeedback && (
             <div
-              className="rounded-xl border-2 border-safety/70 bg-white px-3 py-3 text-sm font-semibold leading-snug text-zinc-800 shadow-sm dark:bg-slate-900 dark:text-zinc-200 dark:shadow-card"
+              className="rounded-xl border-2 border-accent/70 bg-white px-3 py-3 text-sm font-semibold leading-snug text-zinc-800 shadow-sm dark:bg-slate-900 dark:text-zinc-200 dark:shadow-card"
               role="status"
             >
               {routeOptimizeFeedback}
@@ -1127,7 +1468,7 @@ export default function App() {
                         key={s.id}
                         className={`overflow-hidden rounded-2xl shadow-sm transition dark:shadow-card ${
                           isActive
-                            ? "border-4 border-safety"
+                            ? "border-4 border-accent"
                             : "border-2 border-zinc-300 dark:border-white/35"
                         } bg-white dark:bg-slate-800 ${s.completed ? "opacity-[0.72] dark:opacity-[0.62]" : "opacity-100"}`}
                       >
@@ -1139,7 +1480,7 @@ export default function App() {
                           >
                             {step != null ? (
                               <span
-                                className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 border-safety bg-zinc-100 text-safety dark:bg-[#0a1522]"
+                                className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 border-accent bg-zinc-100 text-accent dark:bg-[#0a1522]"
                                 aria-hidden
                               >
                                 <span className="text-[10px] font-bold uppercase leading-none text-zinc-500 dark:text-white/55">
@@ -1159,7 +1500,7 @@ export default function App() {
                             )}
                             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
                               {isActive ? (
-                                <span className="text-xs font-black uppercase tracking-wide text-safety">
+                                <span className="text-xs font-black uppercase tracking-wide text-accent">
                                   Valgt · brug NAVIGÉR nedenfor
                                 </span>
                               ) : (
@@ -1215,7 +1556,7 @@ export default function App() {
                           </button>
                         </div>
 
-                        <div className="border-t-2 border-safety bg-zinc-50 px-3 py-2 dark:bg-slate-900/90">
+                        <div className="border-t-2 border-accent bg-zinc-50 px-3 py-2 dark:bg-slate-900/90">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-xs font-bold uppercase tracking-wide text-zinc-500">
                               Status
@@ -1229,7 +1570,7 @@ export default function App() {
                               aria-pressed={s.completed}
                               className={`touch-manipulation inline-flex min-h-[46px] max-w-[11rem] shrink-0 items-center justify-center gap-2 rounded-xl border-2 px-4 text-sm font-extrabold shadow-md transition active:scale-[0.97] ${
                                 s.completed
-                                  ? "border-safetyDeep bg-safety text-black"
+                                  ? "border-accentDeep bg-accent text-black"
                                   : "border-zinc-300 bg-zinc-200 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
                               } `}
                             >
@@ -1263,7 +1604,9 @@ export default function App() {
           )}
         </section>
       </main>
+      ) : null}
 
+      {screen === "editor" ? (
       <div className="fixed bottom-0 left-0 right-0 z-30 border-t-2 border-zinc-200 bg-white p-4 shadow-[0_-10px_28px_rgba(0,0,0,0.12)] dark:border-white/20 dark:bg-[#0a1522] dark:shadow-[0_-10px_28px_rgba(0,0,0,0.65)]">
         <div className="mx-auto max-w-lg">
           <p className="mb-2 line-clamp-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
@@ -1275,7 +1618,7 @@ export default function App() {
               if (activeStop) openNativeNavigation(formatAddressForNav(activeStop));
             }}
             disabled={!activeStop}
-            className="flex w-full min-h-[64px] touch-manipulation items-center justify-center rounded-2xl border-2 border-safetyDeep bg-safety text-xl font-black text-black shadow-sm transition active:scale-[0.98] active:bg-safetyDeep disabled:cursor-not-allowed disabled:opacity-45 dark:shadow-card"
+            className="flex w-full min-h-[64px] touch-manipulation items-center justify-center rounded-2xl border-2 border-accentDeep bg-accent text-xl font-black text-black shadow-sm transition active:scale-[0.98] active:bg-accentDeep disabled:cursor-not-allowed disabled:opacity-45 dark:shadow-card"
           >
             NAVIGÉR
           </button>
@@ -1284,6 +1627,7 @@ export default function App() {
           </p>
         </div>
       </div>
+      ) : null}
     </div>
   );
 }

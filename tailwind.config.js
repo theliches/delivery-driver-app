@@ -5,9 +5,9 @@ export default {
   theme: {
     extend: {
       colors: {
-        /** Orange — ekstra lys til sol / udendørs */
-        safety: "#FF6B35",
-        safetyDeep: "#E85A24",
+        /** Sættes fra App via --accent-rgb / --accent-deep-rgb (menu: accentfarve) */
+        accent: "rgb(var(--accent-rgb) / <alpha-value>)",
+        accentDeep: "rgb(var(--accent-deep-rgb) / <alpha-value>)",
         /** Grøn «leveret» — høj synlighed */
         go: "#34D399",
         goDeep: "#059669",

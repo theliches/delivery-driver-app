@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Standard orange — overskrives når bruger vælger accent i menuen */
+  --accent-rgb: 255 107 53;
+  --accent-deep-rgb: 232 90 36;
+}
+
 html,
 body,
 #root {
@@ -10,5 +16,5 @@ body,
 
 body {
   @apply antialiased bg-zinc-100 text-zinc-900 dark:bg-[#070d14] dark:text-white;
-  -webkit-tap-highlight-color: rgba(255, 107, 53, 0.25);
+  -webkit-tap-highlight-color: rgb(var(--accent-rgb) / 0.28);
 }
