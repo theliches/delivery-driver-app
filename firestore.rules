@@ -22,6 +22,33 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    function validRouteDoc() {
+      let d = request.resource.data;
+      return d.keys().hasAll(['title', 'rawInput', 'stops', 'updatedAt'])
+        && d.title is string
+        && d.title.size() > 0
+        && d.title.size() < 300
+        && d.rawInput is string
+        && d.rawInput.size() < 300000
+        && d.stops is list
+        && d.stops.size() >= 0
+        && d.stops.size() <= 220
+        && (!('activeStopId' in d) || d.activeStopId == null || d.activeStopId is string)
+        && d.updatedAt is timestamp;
+    }
+
+    match /users/{userId}/routes/{routeId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && validRouteDoc()
+        && (!resource.exists
+          ? request.resource.data.keys().hasAll(['createdAt'])
+            && request.resource.data.createdAt is timestamp
+          : true);
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

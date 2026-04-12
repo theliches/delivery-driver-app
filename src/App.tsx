@@ -18,11 +18,21 @@ import {
   getDailyRouteUsageLabel,
 } from "./dailyRouteLimit";
 import { optimizeRouteWithStats } from "./routeOptimizer";
+import { copyTextToClipboard } from "./clipboardWrite";
 import { optimizeRouteByRoadWithStats } from "./roadRouting";
 import { MAX_STOPS_PER_ROUTE } from "./routeConstants";
+import { ensureAnonUser, isFirestoreConfigured } from "./firebaseApp";
+import {
+  fetchUserRoute,
+  routeTitleFromStops,
+  saveUserRoute,
+  subscribeUserRouteSummaries,
+  type SavedRouteSummary,
+} from "./routePersistenceFirestore";
 
 const LS_KEY = "delivery-driver-route-v1";
 const THEME_KEY = "delivery-driver-theme";
+const ACTIVE_FIREBASE_ROUTE_LS = "delivery-driver-firebase-active-route-id";
 
 type Stop = ParsedAddress & {
   id: string;
@@ -64,6 +74,79 @@ function savePersisted(data: Persisted): void {
   localStorage.setItem(LS_KEY, JSON.stringify(data));
 }
 
+function IconSun({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="22"
+      height="22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+    </svg>
+  );
+}
+
+function IconMoon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="22"
+      height="22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function IconMenu({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="24"
+      height="24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
+  );
+}
+
+function IconClose({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="22"
+      height="22"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M18 6L6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
 function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/i.test(navigator.userAgent);
 }
@@ -99,6 +182,15 @@ export default function App() {
   const [openRouteDriveKm, setOpenRouteDriveKm] = useState<number | null>(
     null,
   );
+  const [copiedStopId, setCopiedStopId] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
+  const [activeFirestoreRouteId, setActiveFirestoreRouteId] = useState<
+    string | null
+  >(null);
+  const [savedRoutes, setSavedRoutes] = useState<SavedRouteSummary[]>([]);
+  const [cloudMessage, setCloudMessage] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -119,17 +211,128 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    const p = loadPersisted();
-    if (p) {
-      setRawInput(p.rawInput ?? "");
-      setStops(p.stops ?? []);
-      setActiveId(p.activeId ?? null);
-    }
+    let cancelled = false;
+    (async () => {
+      const user = await ensureAnonUser();
+      if (cancelled) return;
+      if (user) {
+        setFirebaseUid(user.uid);
+        setCloudMessage(null);
+      } else {
+        setFirebaseUid(null);
+        if (isFirestoreConfigured()) {
+          setCloudMessage(
+            "Kunne ikke logge på skyen (anonym). Tjek internet — og at Anonymous sign-in er slået til under Firebase → Authentication.",
+          );
+        }
+      }
+
+      let activeRid = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
+      if (user && activeRid) {
+        const remote = await fetchUserRoute(user.uid, activeRid);
+        if (!cancelled && remote) {
+          setRawInput(remote.rawInput);
+          setStops(remote.stops as Stop[]);
+          const nextActive =
+            remote.activeStopId &&
+            remote.stops.some((s) => s.id === remote.activeStopId)
+              ? remote.activeStopId
+              : remote.stops.find((s) => !s.completed)?.id ??
+                remote.stops[0]?.id ??
+                null;
+          setActiveId(nextActive);
+          setActiveFirestoreRouteId(activeRid);
+          setHydrated(true);
+          return;
+        }
+        if (!cancelled) {
+          localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+          activeRid = null;
+        }
+      }
+
+      const p = loadPersisted();
+      if (!cancelled && p) {
+        setRawInput(p.rawInput ?? "");
+        setStops(p.stops ?? []);
+        setActiveId(p.activeId ?? null);
+      }
+      if (!cancelled && user && !activeRid && p && (p.stops?.length ?? 0) > 0) {
+        const st = p.stops ?? [];
+        const aid =
+          p.activeId && st.some((s) => s.id === p.activeId)
+            ? p.activeId
+            : st.find((s) => !s.completed)?.id ?? st[0]?.id ?? null;
+        const rid = newId();
+        await saveUserRoute(user.uid, rid, {
+          title: routeTitleFromStops(st),
+          rawInput: p.rawInput ?? "",
+          stops: st,
+          activeStopId: aid,
+        });
+        if (!cancelled) setActiveFirestoreRouteId(rid);
+      }
+      if (!cancelled) setHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
+    if (!firebaseUid) {
+      setSavedRoutes([]);
+      return;
+    }
+    return subscribeUserRouteSummaries(
+      firebaseUid,
+      (list) => setSavedRoutes(list),
+      () => setCloudMessage("Kunne ikke hente rute-liste fra skyen."),
+    );
+  }, [firebaseUid]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     savePersisted({ rawInput, stops, activeId });
-  }, [rawInput, stops, activeId]);
+  }, [hydrated, rawInput, stops, activeId]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (activeFirestoreRouteId) {
+      localStorage.setItem(ACTIVE_FIREBASE_ROUTE_LS, activeFirestoreRouteId);
+    } else {
+      localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+    }
+  }, [hydrated, activeFirestoreRouteId]);
+
+  useEffect(() => {
+    if (!hydrated || !firebaseUid || !activeFirestoreRouteId) return;
+    const t = window.setTimeout(() => {
+      void saveUserRoute(firebaseUid, activeFirestoreRouteId, {
+        title: routeTitleFromStops(stops),
+        rawInput,
+        stops,
+        activeStopId: activeId,
+      });
+    }, 1400);
+    return () => window.clearTimeout(t);
+  }, [
+    hydrated,
+    firebaseUid,
+    activeFirestoreRouteId,
+    rawInput,
+    stops,
+    activeId,
+  ]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [menuOpen]);
 
   const total = stops.length;
   const completedCount = useMemo(
@@ -166,13 +369,67 @@ export default function App() {
   }, []);
 
   const handleParse = () => {
+    setCopiedStopId(null);
     setRouteOptimizeFeedback(null);
     setOpenRouteDriveKm(null);
     const parsed = parseDanishAddresses(rawInput);
     const next = stopsFromParsed(parsed);
     setStops(next);
     ensureActive(next);
+    if (firebaseUid && !activeFirestoreRouteId && next.length > 0) {
+      const rid = newId();
+      setActiveFirestoreRouteId(rid);
+      const firstOpen =
+        next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
+      void saveUserRoute(firebaseUid, rid, {
+        title: routeTitleFromStops(next),
+        rawInput,
+        stops: next,
+        activeStopId: firstOpen,
+      });
+    }
   };
+
+  const loadSavedRouteIntoApp = useCallback(
+    async (routeId: string) => {
+      if (!firebaseUid) return;
+      const data = await fetchUserRoute(firebaseUid, routeId);
+      if (!data) {
+        setCloudMessage("Den rute findes ikke længere i skyen.");
+        return;
+      }
+      setCloudMessage(null);
+      setCopiedStopId(null);
+      setRouteOptimizeFeedback(null);
+      setOpenRouteDriveKm(null);
+      setRawInput(data.rawInput);
+      setStops(data.stops as Stop[]);
+      const nextActive =
+        data.activeStopId &&
+        data.stops.some((s) => s.id === data.activeStopId)
+          ? data.activeStopId
+          : data.stops.find((s) => !s.completed)?.id ??
+            data.stops[0]?.id ??
+            null;
+      setActiveId(nextActive);
+      setActiveFirestoreRouteId(routeId);
+      setMenuOpen(false);
+    },
+    [firebaseUid],
+  );
+
+  const startNewActiveRoute = useCallback(() => {
+    setCopiedStopId(null);
+    setRouteOptimizeFeedback(null);
+    setOpenRouteDriveKm(null);
+    setRawInput("");
+    setStops([]);
+    setActiveId(null);
+    setActiveFirestoreRouteId(null);
+    localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+    localStorage.removeItem(LS_KEY);
+    setMenuOpen(false);
+  }, []);
 
   const handleOptimize = async () => {
     if (stops.length === 0) return;
@@ -216,6 +473,7 @@ export default function App() {
         orderChanged: boolean;
       },
       extra: string,
+      approxGeocode: boolean,
     ) => {
       const next = [...ordered, ...complete];
       setStops(next);
@@ -226,8 +484,13 @@ export default function App() {
       const a = stats.afterKm.toFixed(1);
       const saved = stats.savedKm;
       let msg = "";
-      if (!stats.orderChanged && Math.abs(saved) < 0.2) {
-        msg = `Rækkefølgen var allerede fin ift. kørevej (ca. ${a} km mellem åbne stop). ${extra}`;
+      if (!stats.orderChanged) {
+        msg = `Rækkefølgen er uændret fra dit valgte stop — ca. ${a} km kørevej mellem åbne stop (OSRM). Ingen grund til at optimere igen, medmindre du ændrer listen eller vælger et andet startstop.`;
+        if (approxGeocode) {
+          msg += ` Nogle adresser bruger omtrentlige punkter (geokodning fejlede).`;
+        }
+      } else if (Math.abs(saved) < 0.3) {
+        msg = `Lille justering: ca. ${b} → ${a} km kørevej (OSRM). ${extra}`.trim();
       } else if (saved >= 0.3) {
         msg = `Rute opdateret efter vej: ca. ${b} km → ${a} km kørt strækning (OSRM). Spar ca. ${saved.toFixed(1)} km. ${extra}`;
       } else if (saved > 0) {
@@ -248,7 +511,7 @@ export default function App() {
       const extra = anyApproxGeocode
         ? "Nogle adresser brugte omtrentlige punkter (geokodning fejlede)."
         : "";
-      applyRoadStats(ordered, stats, extra);
+      applyRoadStats(ordered, stats, extra, anyApproxGeocode);
       recordRouteGenerated();
     } catch {
       setRouteOptimizeFeedback(
@@ -277,15 +540,18 @@ export default function App() {
     setRawInput("");
     setStops([]);
     setActiveId(null);
+    setActiveFirestoreRouteId(null);
     localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
   };
 
   const copyOneAddress = async (e: MouseEvent<HTMLButtonElement>, s: Stop) => {
     e.preventDefault();
     e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(formatAddressForNav(s));
-    } catch {
+    const ok = await copyTextToClipboard(formatAddressForNav(s));
+    if (ok) {
+      setCopiedStopId(s.id);
+    } else {
       setRouteOptimizeFeedback("Kunne ikke kopiere adressen.");
     }
   };
@@ -342,10 +608,13 @@ export default function App() {
             </h1>
             <button
               type="button"
-              onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-              className="shrink-0 touch-manipulation rounded-lg border-2 border-zinc-300 bg-zinc-100 px-3 py-1.5 text-xs font-bold text-zinc-800 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-200"
+              aria-expanded={menuOpen}
+              aria-controls="app-drawer-menu"
+              onClick={() => setMenuOpen((o) => !o)}
+              className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
             >
-              {theme === "dark" ? "Lys" : "Mørk"}
+              <span className="sr-only">Menu</span>
+              <IconMenu />
             </button>
           </div>
           <p className="text-base font-black text-safety drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
@@ -356,6 +625,153 @@ export default function App() {
           </p>
         </div>
       </header>
+
+      {menuOpen ? (
+        <div
+          className="fixed inset-0 z-40 flex justify-end"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="drawer-menu-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/55"
+            aria-label="Luk menu"
+            onClick={() => setMenuOpen(false)}
+          />
+          <aside
+            id="app-drawer-menu"
+            className="relative flex h-full w-full max-w-sm flex-col border-l-2 border-zinc-200 bg-white shadow-2xl dark:border-white/20 dark:bg-[#0d1824]"
+          >
+            <div className="flex items-center justify-between gap-2 border-b-2 border-zinc-200 px-4 py-3 dark:border-white/15">
+              <h2
+                id="drawer-menu-title"
+                className="text-lg font-extrabold text-zinc-900 dark:text-white"
+              >
+                Menu
+              </h2>
+              <button
+                type="button"
+                onClick={() => setMenuOpen(false)}
+                className="touch-manipulation rounded-lg border-2 border-zinc-300 p-2 text-zinc-800 dark:border-white/30 dark:text-zinc-100"
+                aria-label="Luk"
+              >
+                <IconClose />
+              </button>
+            </div>
+
+            <div className="flex flex-1 flex-col gap-5 overflow-y-auto px-4 py-4">
+              <button
+                type="button"
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                className="flex w-full touch-manipulation items-center gap-3 rounded-xl border-2 border-zinc-300 bg-zinc-50 px-4 py-3 text-left font-bold text-zinc-900 dark:border-white/30 dark:bg-slate-800 dark:text-white"
+              >
+                {theme === "dark" ? (
+                  <>
+                    <IconSun className="shrink-0 text-amber-500" />
+                    <span>Lyst tema</span>
+                  </>
+                ) : (
+                  <>
+                    <IconMoon className="shrink-0 text-indigo-400" />
+                    <span>Mørkt tema</span>
+                  </>
+                )}
+              </button>
+
+              {!isFirestoreConfigured() ? (
+                <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
+                  Sæt <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">VITE_FIREBASE_*</code>{" "}
+                  for at gemme ruter i skyen.
+                </p>
+              ) : null}
+
+              {cloudMessage ? (
+                <p className="rounded-xl border-2 border-amber-400/80 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-100">
+                  {cloudMessage}
+                </p>
+              ) : null}
+
+              {firebaseUid ? (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
+                      Dagens rute
+                    </p>
+                    <button
+                      type="button"
+                      onClick={startNewActiveRoute}
+                      className="touch-manipulation rounded-xl border-2 border-safety bg-safety/90 px-4 py-3 text-left text-sm font-extrabold text-black dark:border-safety dark:bg-safety/80"
+                    >
+                      Ny aktiv rute (ny dag)
+                    </button>
+                    <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+                      Tømmer skærmen og starter forfra. Gamle ruter bliver i listen — vælg én nedenfor hvis du vil fortsætte en tidligere.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-500">
+                      Tidligere ruter
+                    </p>
+                    {savedRoutes.length === 0 ? (
+                      <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                        Ingen endnu — tryk «Indlæs adresser» for at oprette din første rute i skyen.
+                      </p>
+                    ) : (
+                      <ul className="flex flex-col gap-2">
+                        {savedRoutes.map((r) => {
+                          const isActive = r.id === activeFirestoreRouteId;
+                          const when = r.updatedAt
+                            ? r.updatedAt.toLocaleString("da-DK", {
+                                day: "numeric",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : "";
+                          return (
+                            <li key={r.id}>
+                              <button
+                                type="button"
+                                onClick={() => void loadSavedRouteIntoApp(r.id)}
+                                className={`flex w-full touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
+                                  isActive
+                                    ? "border-safety bg-safety/15 dark:bg-safety/10"
+                                    : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
+                                }`}
+                              >
+                                <span className="flex items-center justify-between gap-2">
+                                  <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
+                                    {r.title}
+                                  </span>
+                                  {isActive ? (
+                                    <span className="shrink-0 rounded-md bg-safety px-2 py-0.5 text-[10px] font-black uppercase text-black">
+                                      Aktiv
+                                    </span>
+                                  ) : null}
+                                </span>
+                                <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                                  {r.stopCount} stop
+                                  {when ? ` · ${when}` : ""}
+                                </span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                </>
+              ) : isFirestoreConfigured() ? (
+                <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                  Logger ind i skyen… hvis det hænger, genindlæs siden.
+                </p>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
 
       <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 px-4 pb-36 pt-4">
         <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
@@ -509,9 +925,13 @@ export default function App() {
                           <button
                             type="button"
                             onClick={(e) => void copyOneAddress(e, s)}
-                            className="touch-manipulation shrink-0 self-center rounded-lg border-2 border-zinc-300 bg-zinc-100 px-2 py-2 text-xs font-extrabold text-zinc-800 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                            className={`touch-manipulation shrink-0 self-center rounded-lg border-2 px-2 py-2 text-xs font-extrabold ${
+                              copiedStopId === s.id
+                                ? "border-emerald-600 bg-emerald-100 text-emerald-900 dark:border-emerald-500 dark:bg-emerald-950/60 dark:text-emerald-100"
+                                : "border-zinc-300 bg-zinc-100 text-zinc-800 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                            }`}
                           >
-                            Kopiér
+                            {copiedStopId === s.id ? "Kopieret" : "Kopiér"}
                           </button>
                         </div>
 

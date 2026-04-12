@@ -133,6 +133,16 @@ function pathLengthM(order: number[], mx: (number | null)[][]): number {
   return s;
 }
 
+/** Køreafstand langs nuværende liste, startende ved valgte stop (idx) — fair sammenligning med NN. */
+function orderRotatingFromStart(n: number, startIndex: number): number[] {
+  const safe = Math.min(Math.max(startIndex, 0), Math.max(0, n - 1));
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push((safe + i) % n);
+  }
+  return out;
+}
+
 function twoOptSwapOrder(order: number[], i: number, k: number): number[] {
   const next = order.slice(0, i + 1);
   for (let x = k; x > i; x--) next.push(order[x]);
@@ -265,11 +275,11 @@ export async function optimizeRouteByRoadWithStats<
   const mx = await fetchDrivingDistanceMatrix(latLngs);
 
   const n = stops.length;
-  const initialOrder = Array.from({ length: n }, (_, i) => i);
+  const safeStart = Math.min(Math.max(startIndex, 0), n - 1);
+  const initialOrder = orderRotatingFromStart(n, safeStart);
   const beforeM = pathLengthM(initialOrder, mx);
   const beforeKm = beforeM >= BIG ? NaN : beforeM / 1000;
 
-  const safeStart = Math.min(Math.max(startIndex, 0), n - 1);
   let order = nearestNeighborOrder(n, mx, safeStart);
   order = twoOptOpenPath(order, mx);
 
@@ -277,6 +287,7 @@ export async function optimizeRouteByRoadWithStats<
   const afterKm = afterM >= BIG ? NaN : afterM / 1000;
 
   const ordered = order.map((i) => stops[i]);
+  const baselineStops = initialOrder.map((i) => stops[i]);
   const savedKm =
     Number.isFinite(beforeKm) && Number.isFinite(afterKm)
       ? beforeKm - afterKm
@@ -288,7 +299,7 @@ export async function optimizeRouteByRoadWithStats<
       beforeKm: Number.isFinite(beforeKm) ? beforeKm : 0,
       afterKm: Number.isFinite(afterKm) ? afterKm : 0,
       savedKm,
-      orderChanged: !sameOrderById(stops, ordered),
+      orderChanged: !sameOrderById(baselineStops, ordered),
     },
     anyApproxGeocode: anyApprox,
   };
