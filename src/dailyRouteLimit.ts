@@ -6,7 +6,7 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-const MAX_PER_DAY = 5;
+const MAX_PER_DAY = 10;
 
 export function canGenerateRouteToday(): boolean {
   try {

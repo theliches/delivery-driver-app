@@ -16,6 +16,7 @@ import {
   canGenerateRouteToday,
   recordRouteGenerated,
   getDailyRouteUsageLabel,
+  DAILY_ROUTE_LIMIT,
 } from "./dailyRouteLimit";
 import { optimizeRouteWithStats } from "./routeOptimizer";
 import { copyTextToClipboard } from "./clipboardWrite";
@@ -589,7 +590,9 @@ export default function App() {
     }
 
     if (!canGenerateRouteToday()) {
-      setRouteOptimizeFeedback("Daily limit reached (5 routes per day)");
+      setRouteOptimizeFeedback(
+        `Maksimum ${DAILY_ROUTE_LIMIT} ruteberegninger per dag — prøv igen i morgen.`,
+      );
       return;
     }
 
@@ -773,7 +776,7 @@ export default function App() {
               <IconMenu />
             </button>
           </div>
-          <p className="text-base font-black text-safety drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+          <p className="text-base font-black text-safety dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
             TOTAL: {completedCount} / {total} pakker
           </p>
           <p className="text-sm font-semibold leading-snug text-zinc-600 dark:text-zinc-300">
