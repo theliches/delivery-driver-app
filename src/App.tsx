@@ -469,6 +469,42 @@ export default function App() {
     }
   };
 
+  /** Ny dokument-række under «Tidligere ruter» (samme indhold som nu er ok). */
+  const handleParseAsNewCloudRoute = () => {
+    setCopiedStopId(null);
+    setRouteOptimizeFeedback(null);
+    setOpenRouteDriveKm(null);
+    const parsed = parseDanishAddresses(rawInput);
+    const next = stopsFromParsed(parsed);
+    setStops(next);
+    ensureActive(next);
+    if (next.length === 0) return;
+    if (!firebaseUid) {
+      if (isFirestoreConfigured()) {
+        setCloudMessage(
+          "Skyen er ikke klar — vent et øjeblik, eller tryk «Genindlæs ruter» i menuen.",
+        );
+      }
+      return;
+    }
+    const rid = newId();
+    setActiveFirestoreRouteId(rid);
+    const firstOpen =
+      next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
+    const rd =
+      routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+        ? routeDate
+        : todayIsoLocal();
+    void saveUserRoute(firebaseUid, rid, {
+      title: routeTitleFromStops(next),
+      routeName: routeName.trim(),
+      routeDate: rd,
+      rawInput,
+      stops: next,
+      activeStopId: firstOpen,
+    });
+  };
+
   const loadSavedRouteIntoApp = useCallback(
     async (routeId: string) => {
       if (!firebaseUid) return;
@@ -859,8 +895,11 @@ export default function App() {
                       Tryk her hvis listen ser tom eller forkert ud.
                     </p>
                     {savedRoutes.length === 0 ? (
-                      <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-                        Ingen endnu — tryk «Indlæs adresser» for at oprette din første rute i skyen.
+                      <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
+                        Ingen endnu — tryk «Indlæs adresser» (første gang) eller «Som ny rute
+                        i sky-listen» for en ekstra linje. Hvis du kun har trykket «Indlæs»
+                        gentagne gange, er det den samme rute der opdateres. Tryk også «Genindlæs
+                        ruter» hvis listen ser forkert ud.
                       </p>
                     ) : (
                       <ul className="flex flex-col gap-2">
@@ -975,7 +1014,8 @@ export default function App() {
             className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
             htmlFor="raw"
           >
-            Rå tekst — du kan indsætte nummererede linjer (1. … 2. …)
+            Rå tekst — nummererede linjer (1. …) er fint. Overskrifter, OBS,
+            punktopstillinger og tomme linjer ignoreres ofte automatisk.
           </label>
           <textarea
             id="raw"
@@ -1012,6 +1052,20 @@ export default function App() {
               Ryd
             </button>
           </div>
+          <button
+            type="button"
+            onClick={handleParseAsNewCloudRoute}
+            disabled={!rawInput.trim()}
+            title="Opretter en ny linje under «Tidligere ruter» i menuen (samme tekst som nu er ok)."
+            className="w-full touch-manipulation rounded-xl border-2 border-dashed border-zinc-400 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800/80 dark:text-zinc-100"
+          >
+            Som ny rute i sky-listen
+          </button>
+          <p className="text-center text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
+            «Indlæs adresser» opdaterer den <span className="font-semibold">aktive</span>{" "}
+            sky-rute. Brug knappen herover for hver ekstra linje i menuen (fx samme liste
+            som ny tur).
+          </p>
           <p className="text-center text-xs text-zinc-500 dark:text-zinc-500">
             {getDailyRouteUsageLabel()}
           </p>

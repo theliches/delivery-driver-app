@@ -38,6 +38,34 @@ export function stripLeadingEnumeration(line: string): string {
   return s.trim();
 }
 
+/** Linjer der typisk følger med fra copy/paste uden at være adresser. */
+function isNoiseOrSeparatorLine(s: string): boolean {
+  const t = s.trim();
+  if (t.length === 0) return true;
+  if (/^[-=*_#.\s•·▪─═_|\\/]{3,}$/u.test(t)) return true;
+  if (
+    /^(obs|note|notat|info|bemærk|afsender|modtager|kunde|ordre|pakkenr|pakke\s*nr|tracking|leverings|instruks|afhent|hentes)\s*:/iu.test(
+      t,
+    )
+  ) {
+    if (/\d{4}\s+[A-ZÆØÅa-zæøå]/u.test(t)) return false;
+    return true;
+  }
+  return false;
+}
+
+/** Tabs, NBSP, bullets og bindestregs-punktopstillinger før adresse. */
+function preprocessAddressChunk(chunk: string): string | null {
+  let s = chunk.replace(/\t/g, " ").replace(/\u00a0/g, " ").trim();
+  if (isNoiseOrSeparatorLine(s)) return null;
+  s = stripLeadingEnumeration(s);
+  s = s.replace(/^\s*[•·▪▸‣►]\s*/u, "");
+  s = s.replace(/^\s*[-*–—]\s+(?=\S)/u, "");
+  s = s.trim();
+  if (!s || isNoiseOrSeparatorLine(s)) return null;
+  return s;
+}
+
 function trimCity(name: string): string {
   return name.replace(/\s+/g, " ").replace(/[.,;:]+$/, "").trim();
 }
@@ -76,12 +104,13 @@ export function parseDanishAddresses(text: string): ParsedAddress[] {
   const results: ParsedAddress[] = [];
 
   const chunks = normalized
-    .split(/(?:\n|\r|;|\|)+/)
+    .split(/(?:\n\s*\n|\n|\r|;|\|)+/)
     .map((c) => c.trim())
     .filter(Boolean);
 
   for (const chunk of chunks) {
-    const chunkClean = stripLeadingEnumeration(chunk);
+    const chunkClean = preprocessAddressChunk(chunk);
+    if (chunkClean == null) continue;
     const lineMatch = chunkClean.match(LINE_ADDRESS_REGEX);
     if (lineMatch) {
       pushUnique(

@@ -97,19 +97,45 @@ function docToRouteSummary(d: QueryDocumentSnapshot): SavedRouteSummary {
     routeName: routeName.slice(0, 100),
     routeDate,
     stopCount,
-    updatedAt: tsToDate(x.updatedAt),
+    updatedAt: tsToDate(x.updatedAt) ?? tsToDate(x.createdAt),
   };
 }
 
-/** Engangs-hentning af rute-listen (samme sortering som live-listener). */
+const ROUTE_LIST_LIMIT = 40;
+/** Max antal dokumenter der hentes (sorteres i app’en). */
+const ROUTE_FETCH_CAP = 200;
+
+function sortSummariesNewestFirst(list: SavedRouteSummary[]): SavedRouteSummary[] {
+  return [...list].sort(
+    (a, b) =>
+      (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0),
+  );
+}
+
+/**
+ * Engangs-hentning — prøver `orderBy` (hurtig/korrekt); ved fejl (fx manglende index)
+ * hentes et batch og sorteres i app’en.
+ */
 export async function fetchUserRouteSummaries(
   uid: string,
 ): Promise<SavedRouteSummary[]> {
   const db = getFirestoreDb();
   if (!db) return [];
-  const q = query(routesColl(db, uid), orderBy("updatedAt", "desc"), limit(40));
-  const snap = await getDocs(q);
-  return snap.docs.map(docToRouteSummary);
+  const coll = routesColl(db, uid);
+  try {
+    const q = query(
+      coll,
+      orderBy("updatedAt", "desc"),
+      limit(ROUTE_LIST_LIMIT),
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(docToRouteSummary);
+  } catch {
+    const q2 = query(coll, limit(ROUTE_FETCH_CAP));
+    const snap = await getDocs(q2);
+    const list = sortSummariesNewestFirst(snap.docs.map(docToRouteSummary));
+    return list.slice(0, ROUTE_LIST_LIMIT);
+  }
 }
 
 export function routeTitleFromStops(stops: { length: number }): string {
@@ -212,11 +238,12 @@ export function subscribeUserRouteSummaries(
     onList([]);
     return () => {};
   }
-  const q = query(routesColl(db, uid), orderBy("updatedAt", "desc"), limit(40));
+  const q = query(routesColl(db, uid), limit(ROUTE_FETCH_CAP));
   return onSnapshot(
     q,
     (snap) => {
-      onList(snap.docs.map(docToRouteSummary));
+      const list = sortSummariesNewestFirst(snap.docs.map(docToRouteSummary));
+      onList(list.slice(0, ROUTE_LIST_LIMIT));
     },
     (err) => onError?.(err),
   );
