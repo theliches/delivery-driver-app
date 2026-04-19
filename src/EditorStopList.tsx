@@ -4,6 +4,8 @@ import {
   uniquePostalLabels,
   type ParsedAddress,
 } from "./addressParser";
+import { AddressIconToggles } from "./AddressIconToggles";
+import type { AddressIconFlags, AddressIconKind } from "./addressIconKey";
 
 type Stop = ParsedAddress & { id: string; completed: boolean };
 
@@ -47,6 +49,8 @@ export function EditorStopList(props: {
     s: Stop,
   ) => void | Promise<void>;
   copiedStopId: string | null;
+  getAddressIconFlags: (s: Stop) => AddressIconFlags;
+  onToggleAddressIcon: (s: Stop, kind: AddressIconKind) => void;
 }) {
   const {
     sectionsByCity,
@@ -59,6 +63,8 @@ export function EditorStopList(props: {
     toggleComplete,
     copyOneAddress,
     copiedStopId,
+    getAddressIconFlags,
+    onToggleAddressIcon,
   } = props;
 
   return (
@@ -241,6 +247,13 @@ export function EditorStopList(props: {
                         >
                           {copiedStopId === s.id ? "Kopieret" : "Kopiér"}
                         </button>
+                      </div>
+
+                      <div className="border-t border-zinc-200 px-2 py-2 sm:px-3 dark:border-white/15">
+                        <AddressIconToggles
+                          flags={getAddressIconFlags(s)}
+                          onToggle={(kind) => onToggleAddressIcon(s, kind)}
+                        />
                       </div>
 
                       <div className="border-t-2 border-accent bg-zinc-50 px-3 py-2 dark:bg-slate-900/90">

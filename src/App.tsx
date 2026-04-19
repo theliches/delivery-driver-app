@@ -38,6 +38,14 @@ import {
   todayIsoLocal,
   type SavedRouteSummary,
 } from "./routePersistenceFirestore";
+import { AddressIconToggles } from "./AddressIconToggles";
+import {
+  DEFAULT_ADDRESS_ICON_FLAGS,
+  parsedAddressIconKey,
+  type AddressIconFlags,
+  type AddressIconKind,
+} from "./addressIconKey";
+import { saveAddressIconFlags, subscribeAddressIconFlags } from "./addressIconsFirestore";
 import { RoutePositionNumpad } from "./RoutePositionNumpad";
 import { StopRouteMap } from "./StopRouteMap";
 
@@ -50,6 +58,27 @@ const ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS =
 const LOCAL_TO_CLOUD_SEED_PREFIX = "delivery-driver-local-seeded-";
 /** Debounce for sky-synk — hold ved 900 ms for at undgå for hyppige Firestore-skrivninger. */
 const CLOUD_SYNC_DEBOUNCE_MS = 900;
+const ADDRESS_ICONS_LS_KEY = "delivery-driver-address-icons-v1";
+
+function readAddressIconsLs(): Record<string, AddressIconFlags> {
+  try {
+    const raw = localStorage.getItem(ADDRESS_ICONS_LS_KEY);
+    if (!raw) return {};
+    const o = JSON.parse(raw) as Record<string, Record<string, unknown>>;
+    const out: Record<string, AddressIconFlags> = {};
+    for (const [k, v] of Object.entries(o)) {
+      if (!v || typeof v !== "object") continue;
+      out[k] = {
+        door: Boolean(v.door),
+        frost: Boolean(v.frost),
+        alert: Boolean(v.alert),
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 function readLsActiveFirebaseRouteId(): string | null {
   try {
@@ -397,6 +426,9 @@ export default function App() {
   const [highlightedSavedRouteId, setHighlightedSavedRouteId] = useState<
     string | null
   >(null);
+  const [addressIconsByKey, setAddressIconsByKey] = useState<
+    Record<string, AddressIconFlags>
+  >(() => readAddressIconsLs());
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -639,6 +671,32 @@ export default function App() {
       () => setCloudMessage("Kunne ikke hente rute-liste fra skyen."),
     );
   }, [firebaseUid]);
+
+  useEffect(() => {
+    if (!firebaseUid) return;
+    return subscribeAddressIconFlags(
+      firebaseUid,
+      (fromCloud) => {
+        setAddressIconsByKey((prev) => ({ ...prev, ...fromCloud }));
+      },
+      () =>
+        setCloudMessage(
+          "Kunne ikke hente adresse-markeringer (dør / frost / OBS) fra skyen.",
+        ),
+    );
+  }, [firebaseUid]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(
+        ADDRESS_ICONS_LS_KEY,
+        JSON.stringify(addressIconsByKey),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [hydrated, addressIconsByKey]);
 
   useEffect(() => {
     if (!firebaseUid) {
@@ -1766,6 +1824,29 @@ export default function App() {
     }
   };
 
+  const getAddressIconFlagsForStop = useCallback(
+    (address: Stop): AddressIconFlags =>
+      addressIconsByKey[parsedAddressIconKey(address)] ??
+      DEFAULT_ADDRESS_ICON_FLAGS,
+    [addressIconsByKey],
+  );
+
+  const toggleAddressIcon = useCallback(
+    (address: Stop, kind: AddressIconKind) => {
+      const key = parsedAddressIconKey(address);
+      let nextFlags = DEFAULT_ADDRESS_ICON_FLAGS;
+      setAddressIconsByKey((prev) => {
+        const cur = prev[key] ?? DEFAULT_ADDRESS_ICON_FLAGS;
+        nextFlags = { ...cur, [kind]: !cur[kind] };
+        return { ...prev, [key]: nextFlags };
+      });
+      if (firebaseUid) {
+        void saveAddressIconFlags(firebaseUid, address, nextFlags);
+      }
+    },
+    [firebaseUid],
+  );
+
   const toggleComplete = (id: string) => {
     setOpenRouteDriveKm(null);
     setStops((prev) =>
@@ -2823,7 +2904,8 @@ export default function App() {
               <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
                 Nr. følger kun <span className="font-semibold">ikke-leverede</span> stop. Pile eller
                 tryk på <span className="font-semibold">Nr.</span> (numpad) flytter rækkefølge og
-                opdaterer kortet.
+                opdaterer kortet. Dør / frost / OBS gemmes{" "}
+                <span className="font-semibold">én gang pr. adresse</span> (også på tværs af ruter).
               </p>
               <ol className="flex list-none flex-col gap-2 p-0">
                 {mapOverviewStops.map((s) => {
@@ -2932,6 +3014,12 @@ export default function App() {
                           </div>
                         ) : null}
                       </div>
+                      <div className="px-0.5 pt-2">
+                        <AddressIconToggles
+                          flags={getAddressIconFlagsForStop(s)}
+                          onToggle={(kind) => toggleAddressIcon(s, kind)}
+                        />
+                      </div>
                       <div className="flex flex-wrap gap-2 border-t border-zinc-200 pt-3 dark:border-white/15">
                         <button
                           type="button"
@@ -3002,7 +3090,11 @@ export default function App() {
           </span>{" "}
           for numpad — kørerækkefølge og stopnr. opdateres med det samme. Listen er fordelt
           under overskrifter pr. postnr. og by; flere leveringer til samme hus
-          vises som ét kort med antal.
+          vises som ét kort med antal. Under hvert stop:{" "}
+          <span className="font-semibold">dør</span>,{" "}
+          <span className="font-semibold">frost</span> og{" "}
+          <span className="font-semibold">OBS</span> — slået fra som standard; gemmes én gang pr.
+          adresse så det følger med næste gang du har den i en rute.
         </p>
 
         {(stops.length > 0 || activeFirestoreRouteId != null) && (
@@ -3150,6 +3242,8 @@ export default function App() {
           toggleComplete={toggleComplete}
           copyOneAddress={copyOneAddress}
           copiedStopId={copiedStopId}
+          getAddressIconFlags={getAddressIconFlagsForStop}
+          onToggleAddressIcon={toggleAddressIcon}
         />
       </main>
       ) : null}

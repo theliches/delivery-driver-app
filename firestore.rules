@@ -32,6 +32,17 @@ service cloud.firestore {
             && (d.workspace == 'route' || d.workspace == 'mapOverview'));
     }
 
+    function addressIconWriteOk() {
+      let d = request.resource.data;
+      return d.keys().hasAll(['door', 'frost', 'alert', 'updatedAt'])
+        && d.door is bool
+        && d.frost is bool
+        && d.alert is bool
+        && d.updatedAt is timestamp
+        && (!('canonical' in d)
+          || (d.canonical is string && d.canonical.size() >= 0 && d.canonical.size() <= 500));
+    }
+
     function routeCreateOk() {
       let d = request.resource.data;
       return d.keys().hasAll(['title', 'rawInput', 'stops', 'createdAt', 'updatedAt'])
@@ -67,6 +78,16 @@ service cloud.firestore {
         && routeUpdateOk();
 
       allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId}/addressIcons/{docId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && docId.size() >= 8
+        && docId.size() <= 64
+        && addressIconWriteOk();
     }
 
     match /addressCache/{docId} {
