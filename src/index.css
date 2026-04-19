@@ -18,3 +18,13 @@ body {
   @apply antialiased bg-zinc-100 text-zinc-900 dark:bg-[#070d14] dark:text-white;
   -webkit-tap-highlight-color: rgb(var(--accent-rgb) / 0.28);
 }
+
+/* Tailwind preflight sætter img { max-width: 100% }, hvilket bøjer OSM-fliser */
+.leaflet-container img.leaflet-tile {
+  max-width: none !important;
+}
+
+.leaflet-container .stop-route-marker {
+  background: transparent !important;
+  border: none !important;
+}

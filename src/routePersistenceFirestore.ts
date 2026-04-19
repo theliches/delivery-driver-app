@@ -277,9 +277,10 @@ export async function fetchUserRoute(
         const zip = typeof o.zip === "string" ? o.zip : "";
         const city = typeof o.city === "string" ? o.city : "";
         const raw = typeof o.raw === "string" ? o.raw : "";
+        const unit = typeof o.unit === "string" ? o.unit.trim() : "";
         const completed = Boolean(o.completed);
         if (!id || !street || !houseNumber || !zip || !city) return null;
-        return {
+        const stop: FirestoreStop = {
           id,
           street,
           houseNumber,
@@ -288,6 +289,8 @@ export async function fetchUserRoute(
           raw,
           completed,
         };
+        if (unit) stop.unit = unit;
+        return stop;
       })
       .filter((s): s is FirestoreStop => s != null);
     const name =

@@ -11,9 +11,10 @@ import { onAuthStateChanged } from "firebase/auth";
 import {
   formatAddressForNav,
   parseDanishAddresses,
-  cityBaseDisplay,
+  clusterStopsByBuildingForDisplay,
   type ParsedAddress,
 } from "./addressParser";
+import { EditorStopList } from "./EditorStopList";
 import {
   canGenerateRouteToday,
   recordRouteGenerated,
@@ -41,6 +42,7 @@ import {
   todayIsoLocal,
   type SavedRouteSummary,
 } from "./routePersistenceFirestore";
+import { StopRouteMap } from "./StopRouteMap";
 
 const LS_KEY = "delivery-driver-route-v1";
 const THEME_KEY = "delivery-driver-theme";
@@ -218,44 +220,6 @@ function IconArrowLeft({ className }: { className?: string }) {
   );
 }
 
-function IconChevronUp({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M18 15l-6-6-6 6" />
-    </svg>
-  );
-}
-
-function IconChevronDown({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M6 9l6 6 6-6" />
-    </svg>
-  );
-}
-
 function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/i.test(navigator.userAgent);
 }
@@ -266,18 +230,6 @@ function openNativeNavigation(fullAddress: string): void {
     ? `comgooglemaps://?daddr=${q}`
     : `google.navigation:q=${q}`;
   window.location.href = url;
-}
-
-function zipGroupOrder(stops: Stop[]): string[] {
-  const seen = new Set<string>();
-  const order: string[] = [];
-  for (const s of stops) {
-    if (!seen.has(s.zip)) {
-      seen.add(s.zip);
-      order.push(s.zip);
-    }
-  }
-  return order;
 }
 
 export default function App() {
@@ -982,27 +934,14 @@ export default function App() {
     });
   }, []);
 
-  const zipOrder = useMemo(() => zipGroupOrder(stops), [stops]);
-
-  const grouped = useMemo(() => {
-    const map = new Map<string, Stop[]>();
-    for (const s of stops) {
-      const list = map.get(s.zip) ?? [];
-      list.push(s);
-      map.set(s.zip, list);
-    }
-    for (const [, list] of map) {
-      list.sort((a, b) => {
-        if (a.completed !== b.completed) return a.completed ? 1 : -1;
-        return stops.indexOf(a) - stops.indexOf(b);
-      });
-    }
-    return map;
-  }, [stops]);
+  const buildingClusters = useMemo(
+    () => clusterStopsByBuildingForDisplay(stops),
+    [stops],
+  );
 
   const navLabel = activeStop
     ? formatAddressForNav(activeStop)
-    : "Tryk på et stop på kortet herover";
+    : "Vælg et stop på kortet eller på listen herunder";
 
   const incompleteStops = useMemo(
     () => stops.filter((s) => !s.completed),
@@ -1538,10 +1477,33 @@ export default function App() {
 
       {screen === "editor" ? (
       <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 px-4 pb-36 pt-4">
+        {stops.length > 0 ? (
+          <section
+            className="flex flex-col gap-2"
+            aria-label="Kort med stop"
+          >
+            <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Kort — stop efter kørerækkefølge
+            </h2>
+            <StopRouteMap
+              stops={stops}
+              incompleteOrdered={incompleteStops}
+              activeId={activeId}
+              onSelectStop={selectStop}
+              accentHex={ACCENT_PRESETS[accentId].main}
+            />
+          </section>
+        ) : null}
+
         <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
-          Tryk på et stop (hele kortet) for at vælge · derefter{" "}
+          Tryk på et stop på{" "}
+          <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+            kortet
+          </span>{" "}
+          (OpenStreetMap) eller på et stop i listen for at vælge · derefter{" "}
           <span className="font-bold text-accent">NAVIGÉR</span>
-          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge.
+          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge. Flere leveringer
+          til samme hus vises som ét punkt med antal.
         </p>
 
         {(stops.length > 0 || activeFirestoreRouteId != null) && (
@@ -1593,8 +1555,9 @@ export default function App() {
             className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
             htmlFor="raw"
           >
-            Rå tekst — nummererede linjer (1. …) er fint. Overskrifter, OBS,
-            punktopstillinger og tomme linjer ignoreres ofte automatisk.
+            Rå tekst — én adresse pr. linje. Postnr og by til sidst (fx «…, Stue
+            3, 4070 Kirke Hyllinge» eller «…, Herslev, 4000 Roskilde»). Nummererede
+            linjer (1. …) er fint.
           </label>
           <textarea
             id="raw"
@@ -1671,173 +1634,17 @@ export default function App() {
           )}
         </section>
 
-        <section className="flex flex-col gap-4">
-          {zipOrder.map((zip) => {
-            const list = grouped.get(zip) ?? [];
-            const done = list.filter((s) => s.completed).length;
-            const earliest =
-              list.length > 0
-                ? list.reduce((a, b) =>
-                    stops.indexOf(a) <= stops.indexOf(b) ? a : b,
-                  )
-                : null;
-            const heading = earliest
-              ? `${zip} ${cityBaseDisplay(earliest.city)}`
-              : zip;
-            return (
-              <div key={zip}>
-                <h2 className="mb-2 text-sm font-extrabold uppercase tracking-wide text-zinc-700 drop-shadow-sm dark:text-zinc-300">
-                  {heading} ({done}/{list.length})
-                </h2>
-                <ul className="flex flex-col gap-3">
-                  {list.map((s) => {
-                    const isActive = s.id === activeId;
-                    const step = routeStepById.get(s.id);
-                    const routePos = incompleteStops.findIndex((x) => x.id === s.id);
-                    const showReorder =
-                      step != null &&
-                      incompleteStops.length >= 2 &&
-                      routePos >= 0;
-                    return (
-                      <li
-                        key={s.id}
-                        className={`overflow-hidden rounded-2xl shadow-sm transition dark:shadow-card ${
-                          isActive
-                            ? "border-4 border-accent"
-                            : "border-2 border-zinc-300 dark:border-white/35"
-                        } bg-white dark:bg-slate-800 ${s.completed ? "opacity-[0.72] dark:opacity-[0.62]" : "opacity-100"}`}
-                      >
-                        <div className="flex min-h-[88px] items-stretch gap-2 px-2 py-2 sm:px-3">
-                          <button
-                            type="button"
-                            onClick={() => selectStop(s.id)}
-                            className="touch-manipulation flex min-w-0 flex-1 items-stretch gap-3 rounded-lg px-2 py-3 text-left transition active:bg-zinc-100 dark:active:bg-white/10"
-                          >
-                            {step != null ? (
-                              <span
-                                className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 border-accent bg-zinc-100 text-accent dark:bg-[#0a1522]"
-                                aria-hidden
-                              >
-                                <span className="text-[10px] font-bold uppercase leading-none text-zinc-500 dark:text-white/55">
-                                  Nr.
-                                </span>
-                                <span className="text-2xl font-black leading-none">
-                                  {step}
-                                </span>
-                              </span>
-                            ) : (
-                              <span
-                                className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border-2 border-zinc-300 bg-zinc-100 text-lg font-black text-zinc-400 dark:border-white/25 dark:bg-black/30 dark:text-white/50"
-                                aria-hidden
-                              >
-                                ✓
-                              </span>
-                            )}
-                            <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
-                              {isActive ? (
-                                <span className="text-xs font-black uppercase tracking-wide text-accent">
-                                  Valgt · brug NAVIGÉR nedenfor
-                                </span>
-                              ) : (
-                                <span className="text-xs font-bold text-zinc-500 dark:text-zinc-500">
-                                  Tryk her for at vælge stop
-                                </span>
-                              )}
-                              <p className="text-lg font-extrabold leading-tight text-zinc-900 dark:text-white">
-                                {s.street} {s.houseNumber}
-                              </p>
-                              <p className="text-base font-semibold text-zinc-600 dark:text-zinc-300">
-                                {s.zip} {s.city}
-                              </p>
-                            </div>
-                          </button>
-                          {showReorder ? (
-                            <div
-                              className="flex shrink-0 flex-col gap-0.5 self-center"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                aria-label="Flyt stop op i kørselsrækkefølgen"
-                                disabled={routePos <= 0}
-                                onClick={() => moveStopInRoute(s.id, "up")}
-                                className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
-                              >
-                                <IconChevronUp />
-                              </button>
-                              <button
-                                type="button"
-                                aria-label="Flyt stop ned i kørselsrækkefølgen"
-                                disabled={
-                                  routePos >= incompleteStops.length - 1
-                                }
-                                onClick={() => moveStopInRoute(s.id, "down")}
-                                className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
-                              >
-                                <IconChevronDown />
-                              </button>
-                            </div>
-                          ) : null}
-                          <button
-                            type="button"
-                            onClick={(e) => void copyOneAddress(e, s)}
-                            className={`touch-manipulation shrink-0 self-center rounded-lg border-2 px-2 py-2 text-xs font-extrabold ${
-                              copiedStopId === s.id
-                                ? "border-emerald-600 bg-emerald-100 text-emerald-900 dark:border-emerald-500 dark:bg-emerald-950/60 dark:text-emerald-100"
-                                : "border-zinc-300 bg-zinc-100 text-zinc-800 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
-                            }`}
-                          >
-                            {copiedStopId === s.id ? "Kopieret" : "Kopiér"}
-                          </button>
-                        </div>
-
-                        <div className="border-t-2 border-accent bg-zinc-50 px-3 py-2 dark:bg-slate-900/90">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-bold uppercase tracking-wide text-zinc-500">
-                              Status
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleComplete(s.id);
-                              }}
-                              aria-pressed={s.completed}
-                              className={`touch-manipulation inline-flex min-h-[46px] max-w-[11rem] shrink-0 items-center justify-center gap-2 rounded-xl border-2 px-4 text-sm font-extrabold shadow-md transition active:scale-[0.97] ${
-                                s.completed
-                                  ? "border-accentDeep bg-accent text-black"
-                                  : "border-zinc-300 bg-zinc-200 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
-                              } `}
-                            >
-                              <span
-                                className={`flex size-7 shrink-0 items-center justify-center rounded-md border-2 text-base font-black ${
-                                  s.completed
-                                    ? "border-black/30 bg-black/10 text-black"
-                                    : "border-zinc-400 bg-white/80 text-transparent dark:border-white/40 dark:bg-black/40"
-                                }`}
-                                aria-hidden
-                              >
-                                ✓
-                              </span>
-                              {s.completed ? "Leveret!" : "Leveret"}
-                            </button>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            );
-          })}
-
-          {stops.length === 0 && (
-            <p className="text-center text-base font-medium text-zinc-600 dark:text-zinc-400">
-              Indsæt adresser og tryk &quot;Indlæs adresser&quot; — så er du i
-              gang!
-            </p>
-          )}
-        </section>
+        <EditorStopList
+          buildingClusters={buildingClusters}
+          activeId={activeId}
+          routeStepById={routeStepById}
+          incompleteStops={incompleteStops}
+          selectStop={selectStop}
+          moveStopInRoute={moveStopInRoute}
+          toggleComplete={toggleComplete}
+          copyOneAddress={copyOneAddress}
+          copiedStopId={copiedStopId}
+        />
       </main>
       ) : null}
 
