@@ -6,7 +6,7 @@ import {
   formatAddressForNav,
   type ParsedAddress,
 } from "./addressParser";
-import { approximateCoordinates } from "./routeOptimizer";
+import { coordinatesForMapPlaceholder } from "./routeOptimizer";
 import { geocodeForRouting } from "./roadRouting";
 
 import "leaflet/dist/leaflet.css";
@@ -70,6 +70,18 @@ function makeDivIcon(opts: {
 
 type Cluster = StopRouteMapStop[];
 
+/** Vælg repræsentant til geokodning når samme hus har flere postnr. i data. */
+function pickClusterGeocodeRep<T extends ParsedAddress>(cluster: T[]): T {
+  if (cluster.length <= 1) return cluster[0]!;
+  const counts = new Map<string, number>();
+  for (const s of cluster) {
+    counts.set(s.zip, (counts.get(s.zip) ?? 0) + 1);
+  }
+  const topZip = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]![0];
+  const subset = cluster.filter((s) => s.zip === topZip);
+  return subset[0] ?? cluster[0]!;
+}
+
 function buildClustersInOrder(stops: StopRouteMapStop[]): Cluster[] {
   const byKey = new Map<string, StopRouteMapStop[]>();
   for (const s of stops) {
@@ -110,15 +122,11 @@ export function StopRouteMap(props: {
 
   const approxPositions = useMemo(() => {
     const o: Record<string, { lat: number; lng: number }> = {};
-    clusters.forEach((cluster, i) => {
-      const rep = cluster[0]!;
+    for (const cluster of clusters) {
+      const rep = pickClusterGeocodeRep(cluster);
       const k = buildingKey(rep);
-      const c = approximateCoordinates(rep);
-      o[k] = {
-        lat: c.lat + (i % 7) * 0.00028,
-        lng: c.lng + (Math.floor(i / 7) % 7) * 0.00028,
-      };
-    });
+      o[k] = coordinatesForMapPlaceholder(rep);
+    }
     return o;
   }, [key, clusters]);
 
@@ -136,7 +144,7 @@ export function StopRouteMap(props: {
     void (async () => {
       for (const cluster of clusters) {
         if (cancelled) break;
-        const rep = cluster[0]!;
+        const rep = pickClusterGeocodeRep(cluster);
         const bk = buildingKey(rep);
         try {
           const { coords } = await geocodeForRouting(rep);
@@ -270,8 +278,9 @@ export function StopRouteMap(props: {
         })}
       </MapContainer>
       <p className="border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] font-semibold leading-snug text-zinc-600 dark:border-white/15 dark:bg-slate-900 dark:text-zinc-400">
-        Ved samme bygning vises ét punkt med antal stop. Ellers vises
-        kørerækkefølgen som tal. Tryk en markør for at vælge stop til NAVIGÉR.
+        Punkter flytter sig kort efter indlæsning, når adresser hentes fra
+        OpenStreetMap. Ved samme hus ét punkt med antal; ellers kørerækkefølge
+        som tal. Tryk en markør for at vælge stop til NAVIGÉR.
       </p>
     </div>
   );

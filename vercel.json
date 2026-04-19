@@ -2,5 +2,15 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [
+    {
+      "source": "/api/nominatim/:path*",
+      "destination": "https://nominatim.openstreetmap.org/:path*"
+    },
+    {
+      "source": "/api/osrm/:path*",
+      "destination": "https://router.project-osrm.org/:path*"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }

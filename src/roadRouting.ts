@@ -1,18 +1,18 @@
 import { readAddressCache, writeAddressCache } from "./addressCacheFirestore";
 import { normalizedGeocodeQuery } from "./addressKey";
-import { formatAddressForNav, type ParsedAddress } from "./addressParser";
+import {
+  cityBaseDisplay,
+  formatAddressForNav,
+  type ParsedAddress,
+} from "./addressParser";
 import { approximateCoordinates } from "./routeOptimizer";
 
-/** Offentlig OSRM-demo + Nominatim — ingen API-nøgle; kræver netværk. */
-const NOMINATIM =
-  import.meta.env.DEV
-    ? "/api/nominatim/search"
-    : "https://nominatim.openstreetmap.org/search";
-
-const OSRM_TABLE =
-  import.meta.env.DEV
-    ? "/api/osrm/table/v1/driving"
-    : "https://router.project-osrm.org/table/v1/driving";
+/**
+ * Samme origin som app’en (Vite-proxy lokalt, Vercel-rewrites i prod).
+ * Undgår browser-CORS og giver mere stabile svar end direkte Nominatim-URL.
+ */
+const NOMINATIM_SEARCH = "/api/nominatim/search";
+const OSRM_TABLE = "/api/osrm/table/v1/driving";
 
 const geoCache = new Map<string, { lat: number; lng: number }>();
 
@@ -34,14 +34,63 @@ async function nominatimThrottle(): Promise<void> {
 
 export type LatLng = { lat: number; lng: number };
 
+function parseFirstNominatimHit(data: unknown): LatLng | null {
+  if (!Array.isArray(data) || data.length === 0) return null;
+  const row = data[0] as { lat?: string; lon?: string };
+  if (row.lat == null || row.lon == null) return null;
+  const lat = parseFloat(String(row.lat));
+  const lng = parseFloat(String(row.lon));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
+
+async function nominatimFetchFirstHit(
+  searchParams: URLSearchParams,
+): Promise<LatLng | null> {
+  const url = `${NOMINATIM_SEARCH}?${searchParams.toString()}`;
+  const res = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "Accept-Language": "da,en",
+    },
+  });
+  if (!res.ok) return null;
+  const data: unknown = await res.json();
+  return parseFirstNominatimHit(data);
+}
+
+/** Struktureret søgning (bedre træfforhold i DK end ren fritekst). */
+async function nominatimStructured(addr: ParsedAddress): Promise<LatLng | null> {
+  const street = `${addr.street} ${addr.houseNumber}`.trim();
+  const params = new URLSearchParams({
+    format: "json",
+    limit: "1",
+    addressdetails: "0",
+    countrycodes: "dk",
+    postalcode: addr.zip,
+    street,
+    city: cityBaseDisplay(addr.city),
+  });
+  return nominatimFetchFirstHit(params);
+}
+
+async function nominatimFreeform(addr: ParsedAddress): Promise<LatLng | null> {
+  const q = `${formatAddressForNav(addr)}, Denmark`;
+  const params = new URLSearchParams({
+    format: "json",
+    limit: "1",
+    q,
+  });
+  return nominatimFetchFirstHit(params);
+}
+
 /**
- * Geokodning: hukommelse → Firestore → Nominatim → omtrentligt punkt.
+ * Geokodning: hukommelse → Firestore → Nominatim (struktureret + fritekst) → omtrentligt punkt.
  */
 export async function geocodeForRouting(
   addr: ParsedAddress,
   onProgress?: (label: string) => void,
 ): Promise<{ coords: LatLng; usedApprox: boolean; source: GeocodeSource }> {
-  const q = `${formatAddressForNav(addr)}, Denmark`;
   const norm = normalizedGeocodeQuery(addr);
 
   const mem = geoCache.get(norm);
@@ -57,24 +106,15 @@ export async function geocodeForRouting(
   onProgress?.(`Geokoder: ${addr.street} ${addr.houseNumber}…`);
 
   try {
-    const url = `${NOMINATIM}?format=json&limit=1&q=${encodeURIComponent(q)}`;
-    const res = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        "Accept-Language": "da,en",
-      },
-    });
-    if (!res.ok) throw new Error(String(res.status));
-    const data = (await res.json()) as { lat?: string; lon?: string }[];
-    if (data?.[0]?.lat != null && data[0].lon != null) {
-      const lat = parseFloat(data[0].lat);
-      const lng = parseFloat(data[0].lon);
-      if (Number.isFinite(lat) && Number.isFinite(lng)) {
-        const coords = { lat, lng };
-        geoCache.set(norm, coords);
-        void writeAddressCache(norm, lat, lng);
-        return { coords, usedApprox: false, source: "nominatim" };
-      }
+    let hit = await nominatimStructured(addr);
+    if (!hit) {
+      await nominatimThrottle();
+      hit = await nominatimFreeform(addr);
+    }
+    if (hit) {
+      geoCache.set(norm, hit);
+      void writeAddressCache(norm, hit.lat, hit.lng);
+      return { coords: hit, usedApprox: false, source: "nominatim" };
     }
   } catch {
     /* fallback nedenfor */

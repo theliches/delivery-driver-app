@@ -201,6 +201,23 @@ export function coordinatesForRouteOptimization(
   return { lat: base.lat + dy, lng: base.lng + dx };
 }
 
+/**
+ * Midlertidigt punkt på kortet før Nominatim svarer — lille, deterministisk
+ * spredning omkring postnr./by (ikke som rute-optimeringens store offset).
+ */
+export function coordinatesForMapPlaceholder(addr: ParsedAddress): Coordinates {
+  const base = approximateCoordinates(addr);
+  const seed = hashAddressSeed(
+    `${addr.zip}|${addr.street}|${addr.houseNumber}|${addr.unit ?? ""}`.toLowerCase(),
+  );
+  const z = parseInt(addr.zip, 10);
+  const zPart = Number.isFinite(z) ? (z % 97) / 97 - 0.5 : 0;
+  const dx = ((seed & 0xffff) / 0xffff - 0.5) * 0.02 + zPart * 0.004;
+  const dy =
+    (((seed >>> 16) & 0xffff) / 0xffff - 0.5) * 0.014 - zPart * 0.002;
+  return { lat: base.lat + dy, lng: base.lng + dx };
+}
+
 /** Sum af luftlinje mellem stop i rækkefølge (ikke kørevej). */
 export function straightLineRouteLengthKm(
   stops: ParsedAddress[],
