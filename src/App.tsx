@@ -45,6 +45,17 @@ const THEME_KEY = "delivery-driver-theme";
 const ACCENT_KEY = "delivery-driver-accent";
 const ACTIVE_FIREBASE_ROUTE_LS = "delivery-driver-firebase-active-route-id";
 const LOCAL_TO_CLOUD_SEED_PREFIX = "delivery-driver-local-seeded-";
+/** Debounce for sky-synk — hold ved 900 ms for at undgå for hyppige Firestore-skrivninger. */
+const CLOUD_SYNC_DEBOUNCE_MS = 900;
+
+function readLsActiveFirebaseRouteId(): string | null {
+  try {
+    const v = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
+    return v && v.trim().length > 0 ? v.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 type AccentId = "orange" | "red" | "green" | "blue";
 
@@ -286,9 +297,13 @@ export default function App() {
   const [cloudBootstrapReady, setCloudBootstrapReady] = useState(false);
   const cloudBootstrapDoneForUid = useRef<string | null>(null);
   const cloudBootstrapGeneration = useRef(0);
+  /** `true` under hele auth-bootstrap (fetch/seed) — auto-attach må ikke køre parallelt. */
+  const cloudBootstrapInFlightRef = useRef(false);
   const cloudRouteAttachLock = useRef(false);
-  /** Auto-attach: stop efter gentagne fejl (undgår uendelig løkke); nulstilles ved uid/stoplængde-ændring. */
+  /** Auto-attach: stop efter gentagne fejl (undgår uendelig løkke); nulstilles ved uid- eller rute-signatur-ændring. */
   const cloudAutoAttachFailCount = useRef(0);
+  /** Undgår dobbelt oprettelse af sky-rute ved hurtigt dobbelttryk på «Indlæs adresser». */
+  const handleParseCloudCreateLockRef = useRef(false);
 
   useLayoutEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -324,6 +339,10 @@ export default function App() {
           : todayIsoLocal(),
       );
     }
+    const lsActiveRid = readLsActiveFirebaseRouteId();
+    if (lsActiveRid) {
+      setActiveFirestoreRouteId(lsActiveRid);
+    }
     setHydrated(true);
     setScreen("home");
   }, []);
@@ -337,6 +356,7 @@ export default function App() {
     return onAuthStateChanged(auth, (user) => {
       if (!user) {
         cloudBootstrapDoneForUid.current = null;
+        cloudBootstrapInFlightRef.current = false;
         cloudBootstrapGeneration.current += 1;
         setCloudBootstrapReady(false);
         setFirebaseUid(null);
@@ -349,6 +369,7 @@ export default function App() {
       cloudBootstrapGeneration.current += 1;
       const bootstrapGen = cloudBootstrapGeneration.current;
       setCloudBootstrapReady(false);
+      cloudBootstrapInFlightRef.current = true;
       void (async () => {
         try {
           setCloudMessage(null);
@@ -377,6 +398,7 @@ export default function App() {
             }
             localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
             activeRid = null;
+            setActiveFirestoreRouteId(null);
           }
           const p = loadPersisted();
           const seedKey = `${LOCAL_TO_CLOUD_SEED_PREFIX}${uid}`;
@@ -400,7 +422,7 @@ export default function App() {
                 ? p.routeName.trim()
                 : routeTitleFromStops(st);
             const rid = newId();
-            await saveUserRoute(uid, rid, {
+            const seededOk = await saveUserRoute(uid, rid, {
               name: nm,
               title: routeTitleFromStops(st),
               routeName: typeof p.routeName === "string" ? p.routeName : "",
@@ -409,10 +431,17 @@ export default function App() {
               stops: st,
               activeStopId: aid,
             });
-            localStorage.setItem(seedKey, "1");
-            setActiveFirestoreRouteId(rid);
+            if (seededOk) {
+              localStorage.setItem(seedKey, "1");
+              setActiveFirestoreRouteId(rid);
+            } else {
+              setCloudMessage(
+                "Kunne ikke gemme lokal rute i skyen ved login — tjek netværk/regler og prøv «Indlæs adresser» igen.",
+              );
+            }
           }
         } finally {
+          cloudBootstrapInFlightRef.current = false;
           if (cloudBootstrapGeneration.current === bootstrapGen) {
             setCloudBootstrapReady(true);
           }
@@ -440,12 +469,18 @@ export default function App() {
     }
   }, [firebaseUid]);
 
+  /** Nulstil auto-attach-fejltæller når ruten ændrer sig (fx nyt parse / nye stop-id), så gentagelse er mulig. */
+  const cloudAutoAttachRouteSignature = useMemo(
+    () => `${stops.length}:${stops.map((s) => s.id).join("|")}`,
+    [stops],
+  );
+
   useEffect(() => {
     cloudAutoAttachFailCount.current = 0;
     if (stops.length === 0) {
       cloudRouteAttachLock.current = false;
     }
-  }, [stops.length]);
+  }, [cloudAutoAttachRouteSignature, stops.length]);
 
   /** Efter bootstrap: opret sky-dokument under `users/{uid}/routes/{id}` hvis der stadig mangler ét. */
   useEffect(() => {
@@ -458,8 +493,45 @@ export default function App() {
     ) {
       return;
     }
+    if (cloudBootstrapInFlightRef.current) return;
     if (cloudAutoAttachFailCount.current >= 6) return;
     if (cloudRouteAttachLock.current) return;
+    const lsRid = readLsActiveFirebaseRouteId();
+    if (lsRid) {
+      cloudRouteAttachLock.current = true;
+      setActiveFirestoreRouteId(lsRid);
+      const rd =
+        routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+          ? routeDate
+          : todayIsoLocal();
+      const nm = routeName.trim() || routeTitleFromStops(stops);
+      void saveUserRoute(firebaseUid, lsRid, {
+        name: nm,
+        title: routeTitleFromStops(stops),
+        routeName: routeName.trim(),
+        routeDate: rd,
+        rawInput,
+        stops,
+        activeStopId: activeId,
+      }).then((ok) => {
+        if (ok) {
+          cloudAutoAttachFailCount.current = 0;
+          return;
+        }
+        cloudAutoAttachFailCount.current += 1;
+        setCloudMessage(
+          "Kunne ikke oprette rute i skyen. Deploy `firestore.rules` med `match /users/{userId}/routes/{routeId}` (timestamps + ejerskab).",
+        );
+        setActiveFirestoreRouteId(null);
+        try {
+          localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+        } catch {
+          /* ignore */
+        }
+        cloudRouteAttachLock.current = false;
+      });
+      return;
+    }
     cloudRouteAttachLock.current = true;
     const rid = newId();
     setActiveFirestoreRouteId(rid);
@@ -486,6 +558,11 @@ export default function App() {
         "Kunne ikke oprette rute i skyen. Deploy `firestore.rules` med `match /users/{userId}/routes/{routeId}` (timestamps + ejerskab).",
       );
       setActiveFirestoreRouteId(null);
+      try {
+        localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+      } catch {
+        /* ignore */
+      }
       cloudRouteAttachLock.current = false;
     });
   }, [
@@ -507,10 +584,11 @@ export default function App() {
 
   useEffect(() => {
     if (!hydrated) return;
-    if (activeFirestoreRouteId) {
+    if (!activeFirestoreRouteId) return;
+    try {
       localStorage.setItem(ACTIVE_FIREBASE_ROUTE_LS, activeFirestoreRouteId);
-    } else {
-      localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+    } catch {
+      /* ignore */
     }
   }, [hydrated, activeFirestoreRouteId]);
 
@@ -545,7 +623,7 @@ export default function App() {
           );
         }
       })();
-    }, 900);
+    }, CLOUD_SYNC_DEBOUNCE_MS);
     return () => window.clearTimeout(t);
   }, [
     hydrated,
@@ -660,24 +738,44 @@ export default function App() {
     const next = stopsFromParsed(parsed);
     setStops(next);
     ensureActive(next);
-    if (firebaseUid && !activeFirestoreRouteId && next.length > 0) {
-      const rid = newId();
-      setActiveFirestoreRouteId(rid);
+    if (firebaseUid && next.length > 0) {
+      const fromLs = readLsActiveFirebaseRouteId();
+      const existingRid = activeFirestoreRouteId ?? fromLs;
       const firstOpen =
         next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
       const rd =
         routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
           ? routeDate
           : todayIsoLocal();
-      void saveUserRoute(firebaseUid, rid, {
-        name: routeName.trim() || routeTitleFromStops(next),
-        title: routeTitleFromStops(next),
-        routeName: routeName.trim(),
-        routeDate: rd,
-        rawInput,
-        stops: next,
-        activeStopId: firstOpen,
-      });
+      if (existingRid) {
+        if (!activeFirestoreRouteId) {
+          setActiveFirestoreRouteId(existingRid);
+        }
+        void saveUserRoute(firebaseUid, existingRid, {
+          name: routeName.trim() || routeTitleFromStops(next),
+          title: routeTitleFromStops(next),
+          routeName: routeName.trim(),
+          routeDate: rd,
+          rawInput,
+          stops: next,
+          activeStopId: firstOpen,
+        });
+      } else if (!handleParseCloudCreateLockRef.current) {
+        handleParseCloudCreateLockRef.current = true;
+        const rid = newId();
+        setActiveFirestoreRouteId(rid);
+        void saveUserRoute(firebaseUid, rid, {
+          name: routeName.trim() || routeTitleFromStops(next),
+          title: routeTitleFromStops(next),
+          routeName: routeName.trim(),
+          routeDate: rd,
+          rawInput,
+          stops: next,
+          activeStopId: firstOpen,
+        }).finally(() => {
+          handleParseCloudCreateLockRef.current = false;
+        });
+      }
     }
   };
 
