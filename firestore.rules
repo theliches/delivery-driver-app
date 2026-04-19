@@ -25,6 +25,13 @@ service cloud.firestore {
         || d.activeStopId is string;
     }
 
+    function routeWorkspaceOk() {
+      let d = request.resource.data;
+      return !('workspace' in d)
+        || (d.workspace is string
+            && (d.workspace == 'route' || d.workspace == 'mapOverview'));
+    }
+
     function routeCreateOk() {
       let d = request.resource.data;
       return d.keys().hasAll(['title', 'rawInput', 'stops', 'createdAt', 'updatedAt'])
@@ -32,6 +39,7 @@ service cloud.firestore {
         && routeRawInputOk()
         && routeStopsOk()
         && routeActiveStopIdOk()
+        && routeWorkspaceOk()
         && d.createdAt is timestamp
         && d.updatedAt is timestamp;
     }
@@ -43,6 +51,7 @@ service cloud.firestore {
         && routeRawInputOk()
         && routeStopsOk()
         && routeActiveStopIdOk()
+        && routeWorkspaceOk()
         && d.updatedAt is timestamp;
     }
 

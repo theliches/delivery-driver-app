@@ -38,12 +38,15 @@ import {
   todayIsoLocal,
   type SavedRouteSummary,
 } from "./routePersistenceFirestore";
+import { RoutePositionNumpad } from "./RoutePositionNumpad";
 import { StopRouteMap } from "./StopRouteMap";
 
 const LS_KEY = "delivery-driver-route-v1";
 const THEME_KEY = "delivery-driver-theme";
 const ACCENT_KEY = "delivery-driver-accent";
 const ACTIVE_FIREBASE_ROUTE_LS = "delivery-driver-firebase-active-route-id";
+const ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS =
+  "delivery-driver-firebase-map-overview-route-id";
 const LOCAL_TO_CLOUD_SEED_PREFIX = "delivery-driver-local-seeded-";
 /** Debounce for sky-synk — hold ved 900 ms for at undgå for hyppige Firestore-skrivninger. */
 const CLOUD_SYNC_DEBOUNCE_MS = 900;
@@ -51,6 +54,15 @@ const CLOUD_SYNC_DEBOUNCE_MS = 900;
 function readLsActiveFirebaseRouteId(): string | null {
   try {
     const v = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
+    return v && v.trim().length > 0 ? v.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLsActiveFirebaseMapOverviewRouteId(): string | null {
+  try {
+    const v = localStorage.getItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
     return v && v.trim().length > 0 ? v.trim() : null;
   } catch {
     return null;
@@ -121,6 +133,24 @@ function stopsFromParsed(parsed: ParsedAddress[]): Stop[] {
     id: newId(),
     completed: false,
   }));
+}
+
+/** Omrokerer ét åbent stop til 0-baseret indeks i den åbne del af ruten. */
+function reorderIncompleteStopToIndex(
+  stopsAll: Stop[],
+  stopId: string,
+  targetIndex0: number,
+): Stop[] {
+  const incomplete = stopsAll.filter((x) => !x.completed);
+  const complete = stopsAll.filter((x) => x.completed);
+  const from = incomplete.findIndex((x) => x.id === stopId);
+  if (from < 0) return stopsAll;
+  const clamped = Math.max(0, Math.min(incomplete.length - 1, targetIndex0));
+  if (from === clamped) return stopsAll;
+  const nextIncomplete = [...incomplete];
+  const [item] = nextIncomplete.splice(from, 1);
+  nextIncomplete.splice(clamped, 0, item!);
+  return [...nextIncomplete, ...complete];
 }
 
 function loadPersisted(): Persisted | null {
@@ -348,6 +378,8 @@ export default function App() {
   const [activeFirestoreRouteId, setActiveFirestoreRouteId] = useState<
     string | null
   >(null);
+  const [activeMapOverviewFirestoreRouteId, setActiveMapOverviewFirestoreRouteId] =
+    useState<string | null>(null);
   const [savedRoutes, setSavedRoutes] = useState<SavedRouteSummary[]>([]);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
   const [routeName, setRouteName] = useState("");
@@ -384,6 +416,12 @@ export default function App() {
 
   const [cloudSyncPhase, setCloudSyncPhase] =
     useState<CloudSyncPhase>("idle");
+  const [mapOverviewCloudSyncPhase, setMapOverviewCloudSyncPhase] =
+    useState<CloudSyncPhase>("idle");
+  const [routePositionPicker, setRoutePositionPicker] = useState<{
+    scope: "editor" | "mapOverview";
+    stopId: string;
+  } | null>(null);
   /** Først `true` når auth-bootstrap (restore/seed) er færdig — undgår race med auto-attach. */
   const [cloudBootstrapReady, setCloudBootstrapReady] = useState(false);
   const cloudBootstrapDoneForUid = useRef<string | null>(null);
@@ -395,6 +433,9 @@ export default function App() {
   const cloudAutoAttachFailCount = useRef(0);
   /** Undgår dobbelt oprettelse af sky-rute ved hurtigt dobbelttryk på «Indlæs adresser». */
   const handleParseCloudCreateLockRef = useRef(false);
+  const handleMapOverviewParseCloudCreateLockRef = useRef(false);
+  const cloudMapRouteAttachLock = useRef(false);
+  const cloudMapAutoAttachFailCount = useRef(0);
 
   useLayoutEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -440,6 +481,10 @@ export default function App() {
     if (lsActiveRid) {
       setActiveFirestoreRouteId(lsActiveRid);
     }
+    const lsMapRid = readLsActiveFirebaseMapOverviewRouteId();
+    if (lsMapRid) {
+      setActiveMapOverviewFirestoreRouteId(lsMapRid);
+    }
     setHydrated(true);
     setScreen("home");
   }, []);
@@ -457,6 +502,7 @@ export default function App() {
         cloudBootstrapGeneration.current += 1;
         setCloudBootstrapReady(false);
         setFirebaseUid(null);
+        setActiveMapOverviewFirestoreRouteId(null);
         return;
       }
       const uid = user.uid;
@@ -473,7 +519,7 @@ export default function App() {
           let activeRid = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
           if (activeRid) {
             const remote = await fetchUserRoute(uid, activeRid);
-            if (remote) {
+            if (remote && remote.workspace !== "mapOverview") {
               setRawInput(remote.rawInput);
               setStops(remote.stops as Stop[]);
               setRouteName(primaryRouteLabelFromPayload(remote));
@@ -491,11 +537,39 @@ export default function App() {
                     null;
               setActiveId(nextActive);
               setActiveFirestoreRouteId(activeRid);
-              return;
+            } else {
+              try {
+                localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+              } catch {
+                /* ignore */
+              }
+              activeRid = null;
+              setActiveFirestoreRouteId(null);
             }
-            localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
-            activeRid = null;
-            setActiveFirestoreRouteId(null);
+          }
+          const lsMapBootstrap = readLsActiveFirebaseMapOverviewRouteId();
+          if (lsMapBootstrap) {
+            const mapRemote = await fetchUserRoute(uid, lsMapBootstrap);
+            if (mapRemote && mapRemote.workspace === "mapOverview") {
+              setMapOverviewRawInput(mapRemote.rawInput);
+              setMapOverviewStops(mapRemote.stops as Stop[]);
+              const nextMapActive =
+                mapRemote.activeStopId &&
+                mapRemote.stops.some((s) => s.id === mapRemote.activeStopId)
+                  ? mapRemote.activeStopId
+                  : mapRemote.stops.find((s) => !s.completed)?.id ??
+                    mapRemote.stops[0]?.id ??
+                    null;
+              setMapOverviewActiveId(nextMapActive);
+              setActiveMapOverviewFirestoreRouteId(lsMapBootstrap);
+            } else {
+              try {
+                localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+              } catch {
+                /* ignore */
+              }
+              setActiveMapOverviewFirestoreRouteId(null);
+            }
           }
           const p = loadPersisted();
           const seedKey = `${LOCAL_TO_CLOUD_SEED_PREFIX}${uid}`;
@@ -527,6 +601,7 @@ export default function App() {
               rawInput: p.rawInput ?? "",
               stops: st,
               activeStopId: aid,
+              workspace: "route",
             });
             if (seededOk) {
               localStorage.setItem(seedKey, "1");
@@ -563,6 +638,8 @@ export default function App() {
     if (!firebaseUid) {
       cloudRouteAttachLock.current = false;
       cloudAutoAttachFailCount.current = 0;
+      cloudMapRouteAttachLock.current = false;
+      cloudMapAutoAttachFailCount.current = 0;
     }
   }, [firebaseUid]);
 
@@ -578,6 +655,19 @@ export default function App() {
       cloudRouteAttachLock.current = false;
     }
   }, [cloudAutoAttachRouteSignature, stops.length]);
+
+  const mapOverviewCloudAutoAttachRouteSignature = useMemo(
+    () =>
+      `${mapOverviewStops.length}:${mapOverviewStops.map((s) => s.id).join("|")}`,
+    [mapOverviewStops],
+  );
+
+  useEffect(() => {
+    cloudMapAutoAttachFailCount.current = 0;
+    if (mapOverviewStops.length === 0) {
+      cloudMapRouteAttachLock.current = false;
+    }
+  }, [mapOverviewCloudAutoAttachRouteSignature, mapOverviewStops.length]);
 
   /** Efter bootstrap: opret sky-dokument under `users/{uid}/routes/{id}` hvis der stadig mangler ét. */
   useEffect(() => {
@@ -610,6 +700,7 @@ export default function App() {
         rawInput,
         stops,
         activeStopId: activeId,
+        workspace: "route",
       }).then((ok) => {
         if (ok) {
           cloudAutoAttachFailCount.current = 0;
@@ -645,6 +736,7 @@ export default function App() {
       rawInput,
       stops,
       activeStopId: activeId,
+      workspace: "route",
     }).then((ok) => {
       if (ok) {
         cloudAutoAttachFailCount.current = 0;
@@ -674,6 +766,99 @@ export default function App() {
     activeId,
   ]);
 
+  /** Efter bootstrap: kortoversigt får eget sky-dokument (adskilt fra leveringsrute). */
+  useEffect(() => {
+    if (
+      !hydrated ||
+      !cloudBootstrapReady ||
+      !firebaseUid ||
+      activeMapOverviewFirestoreRouteId ||
+      mapOverviewStops.length === 0
+    ) {
+      return;
+    }
+    if (cloudBootstrapInFlightRef.current) return;
+    if (cloudMapAutoAttachFailCount.current >= 6) return;
+    if (cloudMapRouteAttachLock.current) return;
+    const lsMapRid = readLsActiveFirebaseMapOverviewRouteId();
+    if (lsMapRid) {
+      cloudMapRouteAttachLock.current = true;
+      setActiveMapOverviewFirestoreRouteId(lsMapRid);
+      const rd = todayIsoLocal();
+      const nm =
+        mapOverviewCloudTitle.trim() ||
+        routeTitleFromStops(mapOverviewStops);
+      void saveUserRoute(firebaseUid, lsMapRid, {
+        name: nm.slice(0, 200),
+        title: routeTitleFromStops(mapOverviewStops),
+        routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+        routeDate: rd,
+        rawInput: mapOverviewRawInput,
+        stops: mapOverviewStops,
+        activeStopId: mapOverviewActiveId,
+        workspace: "mapOverview",
+      }).then((ok) => {
+        if (ok) {
+          cloudMapAutoAttachFailCount.current = 0;
+          return;
+        }
+        cloudMapAutoAttachFailCount.current += 1;
+        setCloudMessage(
+          "Kunne ikke oprette kortoversigt-rute i skyen. Tjek netværk og Firestore-regler.",
+        );
+        setActiveMapOverviewFirestoreRouteId(null);
+        try {
+          localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+        } catch {
+          /* ignore */
+        }
+        cloudMapRouteAttachLock.current = false;
+      });
+      return;
+    }
+    cloudMapRouteAttachLock.current = true;
+    const rid = newId();
+    setActiveMapOverviewFirestoreRouteId(rid);
+    const rd = todayIsoLocal();
+    const nm =
+      mapOverviewCloudTitle.trim() || routeTitleFromStops(mapOverviewStops);
+    void saveUserRoute(firebaseUid, rid, {
+      name: nm.slice(0, 200),
+      title: routeTitleFromStops(mapOverviewStops),
+      routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+      routeDate: rd,
+      rawInput: mapOverviewRawInput,
+      stops: mapOverviewStops,
+      activeStopId: mapOverviewActiveId,
+      workspace: "mapOverview",
+    }).then((ok) => {
+      if (ok) {
+        cloudMapAutoAttachFailCount.current = 0;
+        return;
+      }
+      cloudMapAutoAttachFailCount.current += 1;
+      setCloudMessage(
+        "Kunne ikke oprette kortoversigt-rute i skyen. Tjek netværk og Firestore-regler.",
+      );
+      setActiveMapOverviewFirestoreRouteId(null);
+      try {
+        localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+      } catch {
+        /* ignore */
+      }
+      cloudMapRouteAttachLock.current = false;
+    });
+  }, [
+    hydrated,
+    cloudBootstrapReady,
+    firebaseUid,
+    activeMapOverviewFirestoreRouteId,
+    mapOverviewStops,
+    mapOverviewRawInput,
+    mapOverviewActiveId,
+    mapOverviewCloudTitle,
+  ]);
+
   useEffect(() => {
     if (!hydrated) return;
     savePersisted({ rawInput, stops, activeId, routeName, routeDate });
@@ -688,6 +873,19 @@ export default function App() {
       /* ignore */
     }
   }, [hydrated, activeFirestoreRouteId]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!activeMapOverviewFirestoreRouteId) return;
+    try {
+      localStorage.setItem(
+        ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS,
+        activeMapOverviewFirestoreRouteId,
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [hydrated, activeMapOverviewFirestoreRouteId]);
 
   useEffect(() => {
     if (!hydrated || !firebaseUid || !activeFirestoreRouteId) {
@@ -712,6 +910,7 @@ export default function App() {
           rawInput,
           stops,
           activeStopId: activeId,
+          workspace: "route",
         });
         setCloudSyncPhase(ok ? "synced" : "error");
         if (!ok) {
@@ -731,6 +930,52 @@ export default function App() {
     activeId,
     routeName,
     routeDate,
+  ]);
+
+  useEffect(() => {
+    if (!hydrated || !firebaseUid || !activeMapOverviewFirestoreRouteId) {
+      setMapOverviewCloudSyncPhase("idle");
+      return;
+    }
+    setMapOverviewCloudSyncPhase("pending");
+    const t = window.setTimeout(() => {
+      void (async () => {
+        setMapOverviewCloudSyncPhase("syncing");
+        const rd = todayIsoLocal();
+        const nm =
+          mapOverviewCloudTitle.trim() ||
+          routeTitleFromStops(mapOverviewStops);
+        const ok = await saveUserRoute(
+          firebaseUid,
+          activeMapOverviewFirestoreRouteId,
+          {
+            name: nm.slice(0, 200),
+            title: routeTitleFromStops(mapOverviewStops),
+            routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+            routeDate: rd,
+            rawInput: mapOverviewRawInput,
+            stops: mapOverviewStops,
+            activeStopId: mapOverviewActiveId,
+            workspace: "mapOverview",
+          },
+        );
+        setMapOverviewCloudSyncPhase(ok ? "synced" : "error");
+        if (!ok) {
+          setCloudMessage(
+            "Sky-gem (kortoversigt) fejlede — tjek netværk og Firestore-regler.",
+          );
+        }
+      })();
+    }, CLOUD_SYNC_DEBOUNCE_MS);
+    return () => window.clearTimeout(t);
+  }, [
+    hydrated,
+    firebaseUid,
+    activeMapOverviewFirestoreRouteId,
+    mapOverviewRawInput,
+    mapOverviewStops,
+    mapOverviewActiveId,
+    mapOverviewCloudTitle,
   ]);
 
   useEffect(() => {
@@ -802,6 +1047,7 @@ export default function App() {
       rawInput,
       stops,
       activeStopId: activeId,
+      workspace: "route",
     });
   }, [
     hydrated,
@@ -814,17 +1060,96 @@ export default function App() {
     activeId,
   ]);
 
+  const flushActiveMapOverviewRouteToCloud =
+    useCallback(async (): Promise<boolean> => {
+      if (!hydrated || !firebaseUid || !activeMapOverviewFirestoreRouteId) {
+        return true;
+      }
+      const rd = todayIsoLocal();
+      const nm =
+        mapOverviewCloudTitle.trim() ||
+        routeTitleFromStops(mapOverviewStops);
+      return saveUserRoute(
+        firebaseUid,
+        activeMapOverviewFirestoreRouteId,
+        {
+          name: nm.slice(0, 200),
+          title: routeTitleFromStops(mapOverviewStops),
+          routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+          routeDate: rd,
+          rawInput: mapOverviewRawInput,
+          stops: mapOverviewStops,
+          activeStopId: mapOverviewActiveId,
+          workspace: "mapOverview",
+        },
+      );
+    }, [
+      hydrated,
+      firebaseUid,
+      activeMapOverviewFirestoreRouteId,
+      mapOverviewCloudTitle,
+      mapOverviewStops,
+      mapOverviewRawInput,
+      mapOverviewActiveId,
+    ]);
+
   const handleMapOverviewParse = () => {
     const parsed = parseDanishAddresses(mapOverviewRawInput);
     const next = stopsFromParsed(parsed);
     setMapOverviewStops(next);
     ensureMapOverviewActive(next);
+    if (firebaseUid && next.length > 0) {
+      const fromLs = readLsActiveFirebaseMapOverviewRouteId();
+      const existingRid = activeMapOverviewFirestoreRouteId ?? fromLs;
+      const firstOpen =
+        next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
+      const rd = todayIsoLocal();
+      if (existingRid) {
+        if (!activeMapOverviewFirestoreRouteId) {
+          setActiveMapOverviewFirestoreRouteId(existingRid);
+        }
+        void saveUserRoute(firebaseUid, existingRid, {
+          name:
+            mapOverviewCloudTitle.trim() ||
+            routeTitleFromStops(next).slice(0, 200),
+          title: routeTitleFromStops(next),
+          routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+          routeDate: rd,
+          rawInput: mapOverviewRawInput,
+          stops: next,
+          activeStopId: firstOpen,
+          workspace: "mapOverview",
+        });
+      } else if (!handleMapOverviewParseCloudCreateLockRef.current) {
+        handleMapOverviewParseCloudCreateLockRef.current = true;
+        const rid = newId();
+        setActiveMapOverviewFirestoreRouteId(rid);
+        void saveUserRoute(firebaseUid, rid, {
+          name: routeTitleFromStops(next).slice(0, 200),
+          title: routeTitleFromStops(next),
+          routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+          routeDate: rd,
+          rawInput: mapOverviewRawInput,
+          stops: next,
+          activeStopId: firstOpen,
+          workspace: "mapOverview",
+        }).finally(() => {
+          handleMapOverviewParseCloudCreateLockRef.current = false;
+        });
+      }
+    }
   };
 
   const handleMapOverviewClear = () => {
     setMapOverviewRawInput("");
     setMapOverviewStops([]);
     setMapOverviewActiveId(null);
+    setActiveMapOverviewFirestoreRouteId(null);
+    try {
+      localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+    } catch {
+      /* ignore */
+    }
   };
 
   /** Ny sky-rute fra kortoversigt — skifter ikke den aktive rute under «Rute». */
@@ -857,10 +1182,19 @@ export default function App() {
       rawInput: mapOverviewRawInput,
       stops: mapOverviewStops,
       activeStopId: firstOpen,
+      workspace: "mapOverview",
     }).then((ok) => {
       if (ok) {
         setMapOverviewCloudTitle("");
-        setCloudMessage("Rute gemt i skyen — find den på forsiden.");
+        setActiveMapOverviewFirestoreRouteId(rid);
+        try {
+          localStorage.setItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS, rid);
+        } catch {
+          /* ignore */
+        }
+        setCloudMessage(
+          "Rute gemt under «Kortoversigt» på forsiden — ikke blandet med leveringsruter.",
+        );
       } else {
         setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
       }
@@ -896,6 +1230,7 @@ export default function App() {
           rawInput,
           stops: next,
           activeStopId: firstOpen,
+          workspace: "route",
         });
       } else if (!handleParseCloudCreateLockRef.current) {
         handleParseCloudCreateLockRef.current = true;
@@ -909,6 +1244,7 @@ export default function App() {
           rawInput,
           stops: next,
           activeStopId: firstOpen,
+          workspace: "route",
         }).finally(() => {
           handleParseCloudCreateLockRef.current = false;
         });
@@ -954,6 +1290,7 @@ export default function App() {
       rawInput,
       stops,
       activeStopId: firstOpen,
+      workspace: "route",
     }).then((ok) => {
       if (ok) {
         setEditorSaveAsNewTitle("");
@@ -964,11 +1301,23 @@ export default function App() {
   };
 
   const loadSavedRouteIntoApp = useCallback(
-    async (routeId: string) => {
+    async (r: SavedRouteSummary) => {
       if (!firebaseUid) return;
-      const data = await fetchUserRoute(firebaseUid, routeId);
+      if (r.workspace === "mapOverview") {
+        setCloudMessage(
+          "Den rute hører til kortoversigt — åbn den under «Kortoversigt i skyen» på forsiden.",
+        );
+        return;
+      }
+      const data = await fetchUserRoute(firebaseUid, r.id);
       if (!data) {
         setCloudMessage("Den rute findes ikke længere i skyen.");
+        return;
+      }
+      if (data.workspace === "mapOverview") {
+        setCloudMessage(
+          "Den rute hører til kortoversigt — åbn den under «Kortoversigt i skyen» på forsiden.",
+        );
         return;
       }
       setCloudMessage(null);
@@ -991,22 +1340,114 @@ export default function App() {
             data.stops[0]?.id ??
             null;
       setActiveId(nextActive);
-      setActiveFirestoreRouteId(routeId);
+      setActiveFirestoreRouteId(r.id);
       setMenuOpen(false);
       setScreen("editor");
     },
     [firebaseUid],
   );
 
+  const loadSavedRouteIntoMapOverview = useCallback(
+    async (r: SavedRouteSummary) => {
+      if (!firebaseUid) return;
+      if (r.workspace !== "mapOverview") {
+        setCloudMessage(
+          "Den rute er en leveringsrute — åbn den under «Leveringsruter i skyen» på forsiden.",
+        );
+        return;
+      }
+      const data = await fetchUserRoute(firebaseUid, r.id);
+      if (!data) {
+        setCloudMessage("Den rute findes ikke længere i skyen.");
+        return;
+      }
+      if (data.workspace !== "mapOverview") {
+        setCloudMessage(
+          "Den rute er en leveringsrute — åbn den under «Leveringsruter i skyen» på forsiden.",
+        );
+        return;
+      }
+      setCloudMessage(null);
+      setMapOverviewRawInput(data.rawInput);
+      setMapOverviewStops(data.stops as Stop[]);
+      const nextMapActive =
+        data.activeStopId &&
+        data.stops.some((s) => s.id === data.activeStopId)
+          ? data.activeStopId
+          : data.stops.find((s) => !s.completed)?.id ??
+            data.stops[0]?.id ??
+            null;
+      setMapOverviewActiveId(nextMapActive);
+      setActiveMapOverviewFirestoreRouteId(r.id);
+      try {
+        localStorage.setItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS, r.id);
+      } catch {
+        /* ignore */
+      }
+      setMenuOpen(false);
+      setScreen("mapOverview");
+    },
+    [firebaseUid],
+  );
+
+  const transferEditorStopsToMapOverview = useCallback(() => {
+    setCloudMessage(null);
+    setMapOverviewRawInput(rawInput);
+    const cloned = stops.map((s) => ({ ...s }));
+    setMapOverviewStops(cloned);
+    ensureMapOverviewActive(cloned);
+    setActiveMapOverviewFirestoreRouteId(null);
+    try {
+      localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+    } catch {
+      /* ignore */
+    }
+    setMenuOpen(false);
+    setScreen("mapOverview");
+  }, [rawInput, stops, ensureMapOverviewActive]);
+
+  const transferMapOverviewStopsToEditor = useCallback(() => {
+    setCloudMessage(null);
+    setCopiedStopId(null);
+    setRouteOptimizeFeedback(null);
+    setOpenRouteDriveKm(null);
+    setRawInput(mapOverviewRawInput);
+    const cloned = mapOverviewStops.map((s) => ({ ...s }));
+    setStops(cloned);
+    ensureActive(cloned);
+    setActiveFirestoreRouteId(null);
+    try {
+      localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+    } catch {
+      /* ignore */
+    }
+    setMenuOpen(false);
+    setScreen("editor");
+  }, [
+    mapOverviewRawInput,
+    mapOverviewStops,
+    ensureActive,
+  ]);
+
   const goHome = useCallback(async () => {
     setMenuOpen(false);
-    if (hydrated && firebaseUid && activeFirestoreRouteId) {
-      setCloudSyncPhase("syncing");
-      const ok = await flushActiveRouteToCloud();
-      setCloudSyncPhase(ok ? "synced" : "error");
-      if (!ok) {
+    if (hydrated && firebaseUid) {
+      let hadErr = false;
+      if (activeFirestoreRouteId) {
+        setCloudSyncPhase("syncing");
+        const ok = await flushActiveRouteToCloud();
+        setCloudSyncPhase(ok ? "synced" : "error");
+        if (!ok) hadErr = true;
+      }
+      if (activeMapOverviewFirestoreRouteId) {
+        setMapOverviewCloudSyncPhase("syncing");
+        const okM = await flushActiveMapOverviewRouteToCloud();
+        setMapOverviewCloudSyncPhase(okM ? "synced" : "error");
+        if (!okM) hadErr = true;
+      }
+      if (hadErr) {
         setCloudMessage(
-          "Kunne ikke gemme til skyen før forsiden — prøv igen om et øjeblik.",
+          "Kunne ikke gemme alt til skyen før forsiden — prøv igen om et øjeblik.",
         );
       }
     }
@@ -1015,7 +1456,9 @@ export default function App() {
     hydrated,
     firebaseUid,
     activeFirestoreRouteId,
+    activeMapOverviewFirestoreRouteId,
     flushActiveRouteToCloud,
+    flushActiveMapOverviewRouteToCloud,
   ]);
 
   const startNewActiveRoute = useCallback(() => {
@@ -1073,8 +1516,24 @@ export default function App() {
       if (activeFirestoreRouteId === r.id) {
         startNewActiveRoute();
       }
+      if (activeMapOverviewFirestoreRouteId === r.id) {
+        setMapOverviewRawInput("");
+        setMapOverviewStops([]);
+        setMapOverviewActiveId(null);
+        setActiveMapOverviewFirestoreRouteId(null);
+        try {
+          localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
+        } catch {
+          /* ignore */
+        }
+      }
     },
-    [firebaseUid, activeFirestoreRouteId, startNewActiveRoute],
+    [
+      firebaseUid,
+      activeFirestoreRouteId,
+      activeMapOverviewFirestoreRouteId,
+      startNewActiveRoute,
+    ],
   );
 
   const handleOptimize = async () => {
@@ -1248,6 +1707,23 @@ export default function App() {
     });
   }, []);
 
+  const moveStopToRoutePositionOneBased = useCallback(
+    (stopId: string, oneBased: number, scope: "editor" | "mapOverview") => {
+      const target0 = oneBased - 1;
+      if (scope === "editor") {
+        setOpenRouteDriveKm(null);
+        setStops((prev) =>
+          reorderIncompleteStopToIndex(prev, stopId, target0),
+        );
+      } else {
+        setMapOverviewStops((prev) =>
+          reorderIncompleteStopToIndex(prev, stopId, target0),
+        );
+      }
+    },
+    [],
+  );
+
   /** Grupperet efter postnr. + bynavn (som chauffører tænker geografisk). */
   const stopSectionsByCity = useMemo(() => {
     const sectionKey = (s: Stop) =>
@@ -1311,6 +1787,88 @@ export default function App() {
     incompleteStops.forEach((s, i) => m.set(s.id, i + 1));
     return m;
   }, [incompleteStops]);
+
+  const savedRoutesForEditor = useMemo(
+    () => savedRoutes.filter((r) => r.workspace !== "mapOverview"),
+    [savedRoutes],
+  );
+  const savedRoutesForMapOverview = useMemo(
+    () => savedRoutes.filter((r) => r.workspace === "mapOverview"),
+    [savedRoutes],
+  );
+
+  const mapOverviewCloudSyncBanner = useMemo(() => {
+    if (!hydrated) return null;
+    if (!isFirestoreConfigured()) {
+      return (
+        <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-500">
+          Sky ikke konfigureret — kortoversigt gemmes kun lokalt.
+        </p>
+      );
+    }
+    if (!firebaseUid) {
+      return (
+        <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">
+          Log ind for at gemme kortoversigt i skyen (egen liste på forsiden).
+        </p>
+      );
+    }
+    if (!activeMapOverviewFirestoreRouteId) {
+      return (
+        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+          Efter «Indlæs adresser» oprettes et separat sky-dokument — ikke blandet med
+          leveringsruten.
+        </p>
+      );
+    }
+    switch (mapOverviewCloudSyncPhase) {
+      case "idle":
+        return null;
+      case "pending":
+        return (
+          <p
+            className="text-xs font-bold text-amber-800 dark:text-amber-200"
+            role="status"
+          >
+            Venter på gem (kortoversigt)…
+          </p>
+        );
+      case "syncing":
+        return (
+          <p
+            className="text-xs font-bold text-sky-800 dark:text-sky-200"
+            role="status"
+          >
+            Gemmer kortoversigt i skyen…
+          </p>
+        );
+      case "synced":
+        return (
+          <p
+            className="text-xs font-bold text-emerald-800 dark:text-emerald-200"
+            role="status"
+          >
+            Kortoversigt synkroniseret
+          </p>
+        );
+      case "error":
+        return (
+          <p
+            className="text-xs font-bold text-red-700 dark:text-red-300"
+            role="alert"
+          >
+            Kunne ikke gemme kortoversigt — tjek nettet
+          </p>
+        );
+      default:
+        return null;
+    }
+  }, [
+    hydrated,
+    firebaseUid,
+    activeMapOverviewFirestoreRouteId,
+    mapOverviewCloudSyncPhase,
+  ]);
 
   const cloudSyncBanner = useMemo(() => {
     if (!hydrated) return null;
@@ -1460,10 +2018,7 @@ export default function App() {
             <div className="flex items-start gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setScreen("home");
-                }}
+                onClick={() => void goHome()}
                 className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
                 aria-label="Tilbage til forsiden"
               >
@@ -1474,9 +2029,17 @@ export default function App() {
                   Kortoversigt
                 </h1>
                 <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  Kort øverst, derefter tekstfelt og liste (NAVIGÉR/Leveret) — gemmer ikke en
-                  sky-rute; brug «Opret ny rute» for levering.
+                  Egen sky-liste på forsiden — ikke blandet med leveringsruter. Overfør til
+                  «Rute» via menu når du vil køre med optimering m.m.
                 </p>
+                {mapOverviewCloudSyncBanner ? (
+                  <div
+                    className="mt-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 dark:border-white/15 dark:bg-slate-900/80"
+                    aria-live="polite"
+                  >
+                    {mapOverviewCloudSyncBanner}
+                  </div>
+                ) : null}
               </div>
               <div className="flex shrink-0 items-start gap-2">
                 {isFirestoreConfigured() && !firebaseUid ? (
@@ -1523,7 +2086,7 @@ export default function App() {
                   {activeFirestoreRouteId ? "Rediger rute" : "Opret ny rute"}
                 </h1>
                 <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  Gemmes automatisk i skyen · forsiden viser alle ruter
+                  Gemmes i skyen som leveringsrute — kortoversigt har sin egen liste på forsiden
                 </p>
                 {cloudSyncBanner ? (
                   <div
@@ -1700,6 +2263,34 @@ export default function App() {
               {screen === "editor" ? (
                 <button
                   type="button"
+                  disabled={stops.length === 0}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    transferEditorStopsToMapOverview();
+                  }}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 py-3 text-left text-sm font-extrabold text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  Overfør til kortoversigt (kladde)
+                </button>
+              ) : null}
+
+              {screen === "mapOverview" ? (
+                <button
+                  type="button"
+                  disabled={mapOverviewStops.length === 0}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    transferMapOverviewStopsToEditor();
+                  }}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 py-3 text-left text-sm font-extrabold text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  Overfør til rute (kladde)
+                </button>
+              ) : null}
+
+              {screen === "editor" ? (
+                <button
+                  type="button"
                   onClick={() => {
                     setMenuOpen(false);
                     void goHome();
@@ -1713,7 +2304,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setMenuOpen(false);
-                    setScreen("home");
+                    void goHome();
                   }}
                   className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-3 text-left text-sm font-extrabold text-zinc-900 dark:border-white/30 dark:bg-slate-800 dark:text-white"
                 >
@@ -1830,14 +2421,14 @@ export default function App() {
             </button>
           ) : null}
 
-          <section className="flex flex-col gap-3">
+          <section className="flex flex-col gap-4">
             <div className="flex flex-col gap-1">
               <p className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Dine gemte ruter
+                Sky-gemte ruter
               </p>
               <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
-                Listen opdateres automatisk når du redigerer. Tryk på en rute for at åbne
-                den.
+                To adskilte lister — leveringsruter vises ikke under kortoversigt og omvendt.
+                Brug menu «Overfør …» for at kopiere mellem sider uden at flytte sky-lager.
               </p>
             </div>
             {firebaseUid ? (
@@ -1852,65 +2443,146 @@ export default function App() {
                     ? "Henter ruter fra skyen…"
                     : "Genindlæs ruter fra skyen"}
                 </button>
-                {savedRoutes.length === 0 ? (
+                {savedRoutesForEditor.length === 0 &&
+                savedRoutesForMapOverview.length === 0 ? (
                   <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
-                    Ingen endnu — tryk «Opret ny rute», indsæt adresser og «Indlæs adresser».
-                    Flere ruter: brug «Gem som ny sky-rute» under rute eller kortoversigt, eller
-                    opret flere fra forsiden med «Opret ny rute» hver gang.
+                    Ingen endnu — tryk «Opret ny rute» eller «Kortoversigt», indsæt adresser og
+                    «Indlæs adresser». Flere dokumenter: «Gem som ny sky-rute» på den side, hvor
+                    ruten hører til.
                   </p>
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {savedRoutes.map((r) => {
-                      const isActive = r.id === activeFirestoreRouteId;
-                      const headline =
-                        r.name.trim() || r.routeName.trim() || r.title || "Rute";
-                      const dateStr =
-                        r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
-                          ? formatRouteDateDa(r.routeDate)
-                          : null;
-                      const when = r.updatedAt
-                        ? formatDateTimeDdMmYyyyHm(r.updatedAt)
-                        : "";
-                      return (
-                        <li key={r.id} className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void loadSavedRouteIntoApp(r.id)}
-                            className={`flex min-w-0 flex-1 touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
-                              isActive
-                                ? "border-accent bg-accent/15 dark:bg-accent/10"
-                                : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
-                            }`}
-                          >
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
-                                {headline}
-                              </span>
-                              {isActive ? (
-                                <span className="shrink-0 rounded-md bg-accent px-2 py-0.5 text-[10px] font-black uppercase text-black">
-                                  Aktiv
+                ) : null}
+
+                <div className="flex flex-col gap-2">
+                  <p className="text-[11px] font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Leveringsruter
+                  </p>
+                  {savedRoutesForEditor.length === 0 ? (
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
+                      Ingen leveringsruter i skyen endnu.
+                    </p>
+                  ) : (
+                    <ul className="flex flex-col gap-2">
+                      {savedRoutesForEditor.map((r) => {
+                        const isActive = r.id === activeFirestoreRouteId;
+                        const headline =
+                          r.name.trim() ||
+                          r.routeName.trim() ||
+                          r.title ||
+                          "Rute";
+                        const dateStr =
+                          r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
+                            ? formatRouteDateDa(r.routeDate)
+                            : null;
+                        const when = r.updatedAt
+                          ? formatDateTimeDdMmYyyyHm(r.updatedAt)
+                          : "";
+                        return (
+                          <li key={r.id} className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void loadSavedRouteIntoApp(r)}
+                              className={`flex min-w-0 flex-1 touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
+                                isActive
+                                  ? "border-accent bg-accent/15 dark:bg-accent/10"
+                                  : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
+                              }`}
+                            >
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
+                                  {headline}
                                 </span>
-                              ) : null}
-                            </span>
-                            <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                              {dateStr ? `${dateStr} · ` : ""}
-                              {r.stopCount} stop
-                              {when ? ` · opd. ${when}` : ""}
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Slet ruten ${headline}`}
-                            onClick={() => void handleDeleteSavedRoute(r)}
-                            className="shrink-0 touch-manipulation self-stretch rounded-xl border-2 border-red-300 bg-red-50 px-3 py-2 text-xs font-extrabold text-red-900 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-100"
-                          >
-                            Slet
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                                {isActive ? (
+                                  <span className="shrink-0 rounded-md bg-accent px-2 py-0.5 text-[10px] font-black uppercase text-black">
+                                    Aktiv
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                                {dateStr ? `${dateStr} · ` : ""}
+                                {r.stopCount} stop
+                                {when ? ` · opd. ${when}` : ""}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Slet ruten ${headline}`}
+                              onClick={() => void handleDeleteSavedRoute(r)}
+                              className="shrink-0 touch-manipulation self-stretch rounded-xl border-2 border-red-300 bg-red-50 px-3 py-2 text-xs font-extrabold text-red-900 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-100"
+                            >
+                              Slet
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-2 border-t border-zinc-200 pt-4 dark:border-white/15">
+                  <p className="text-[11px] font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Kortoversigt i skyen
+                  </p>
+                  {savedRoutesForMapOverview.length === 0 ? (
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
+                      Ingen kortoversigt-ruter gemt endnu.
+                    </p>
+                  ) : (
+                    <ul className="flex flex-col gap-2">
+                      {savedRoutesForMapOverview.map((r) => {
+                        const isActive = r.id === activeMapOverviewFirestoreRouteId;
+                        const headline =
+                          r.name.trim() ||
+                          r.routeName.trim() ||
+                          r.title ||
+                          "Rute";
+                        const dateStr =
+                          r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
+                            ? formatRouteDateDa(r.routeDate)
+                            : null;
+                        const when = r.updatedAt
+                          ? formatDateTimeDdMmYyyyHm(r.updatedAt)
+                          : "";
+                        return (
+                          <li key={r.id} className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void loadSavedRouteIntoMapOverview(r)}
+                              className={`flex min-w-0 flex-1 touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
+                                isActive
+                                  ? "border-accent bg-accent/15 dark:bg-accent/10"
+                                  : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
+                              }`}
+                            >
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="line-clamp-2 text-sm font-extrabold text-zinc-900 dark:text-white">
+                                  {headline}
+                                </span>
+                                {isActive ? (
+                                  <span className="shrink-0 rounded-md bg-accent px-2 py-0.5 text-[10px] font-black uppercase text-black">
+                                    Aktiv
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                                {dateStr ? `${dateStr} · ` : ""}
+                                {r.stopCount} stop
+                                {when ? ` · opd. ${when}` : ""}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Slet ruten ${headline}`}
+                              onClick={() => void handleDeleteSavedRoute(r)}
+                              className="shrink-0 touch-manipulation self-stretch rounded-xl border-2 border-red-300 bg-red-50 px-3 py-2 text-xs font-extrabold text-red-900 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-100"
+                            >
+                              Slet
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
               </>
             ) : isFirestoreConfigured() ? (
               <div className="flex flex-col gap-2">
@@ -2018,8 +2690,9 @@ export default function App() {
                 Rækkefølge — pil ved åbne stop (samme som rute-siden)
               </h2>
               <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
-                Nr. følger kun <span className="font-semibold">ikke-leverede</span> stop. Pile
-                flytter rækkefølge og opdaterer kortet.
+                Nr. følger kun <span className="font-semibold">ikke-leverede</span> stop. Pile eller
+                tryk på <span className="font-semibold">Nr.</span> (numpad) flytter rækkefølge og
+                opdaterer kortet.
               </p>
               <ol className="flex list-none flex-col gap-2 p-0">
                 {mapOverviewStops.map((s) => {
@@ -2051,6 +2724,29 @@ export default function App() {
                             >
                               ✓
                             </span>
+                          ) : showReorder ? (
+                            <button
+                              type="button"
+                              title="Tryk for at vælge nyt stopnr."
+                              onClick={() =>
+                                setRoutePositionPicker({
+                                  scope: "mapOverview",
+                                  stopId: s.id,
+                                })
+                              }
+                              className={`touch-manipulation flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 bg-zinc-100 transition active:scale-[0.97] dark:bg-[#0a1522] ${
+                                active
+                                  ? "border-accent text-accent"
+                                  : "border-accent/60 text-accent dark:border-accent/50"
+                              }`}
+                            >
+                              <span className="text-[10px] font-bold uppercase leading-none text-zinc-500 dark:text-white/55">
+                                Nr.
+                              </span>
+                              <span className="text-2xl font-black leading-none text-zinc-900 dark:text-white">
+                                {step}
+                              </span>
+                            </button>
                           ) : (
                             <span
                               className={`flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 bg-zinc-100 dark:bg-[#0a1522] ${
@@ -2169,11 +2865,11 @@ export default function App() {
           </span>{" "}
           (OpenStreetMap) eller på et stop i listen for at vælge · derefter{" "}
           <span className="font-bold text-accent">NAVIGÉR</span>
-          . Ved åbne stop: brug pile ↑ ↓ for at ændre{" "}
+          . Ved åbne stop: brug pile ↑ ↓ eller{" "}
           <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-            kørerækkefølge og stopnr. (Nr.)
+            tryk på Nr.
           </span>{" "}
-          — tallet opdateres med det samme på listen og kortet. Listen er fordelt
+          for numpad — kørerækkefølge og stopnr. opdateres med det samme. Listen er fordelt
           under overskrifter pr. postnr. og by; flere leveringer til samme hus
           vises som ét kort med antal.
         </p>
@@ -2304,6 +3000,9 @@ export default function App() {
           incompleteStops={incompleteStops}
           selectStop={selectStop}
           moveStopInRoute={moveStopInRoute}
+          onOpenRoutePositionPicker={(stopId) =>
+            setRoutePositionPicker({ scope: "editor", stopId })
+          }
           toggleComplete={toggleComplete}
           copyOneAddress={copyOneAddress}
           copiedStopId={copiedStopId}
@@ -2335,6 +3034,24 @@ export default function App() {
         </div>
       </div>
       ) : null}
+
+      <RoutePositionNumpad
+        open={routePositionPicker != null}
+        maxPosition={
+          routePositionPicker?.scope === "editor"
+            ? incompleteStops.length
+            : mapOverviewIncompleteStops.length
+        }
+        onClose={() => setRoutePositionPicker(null)}
+        onConfirm={(oneBased) => {
+          if (!routePositionPicker) return;
+          moveStopToRoutePositionOneBased(
+            routePositionPicker.stopId,
+            oneBased,
+            routePositionPicker.scope,
+          );
+        }}
+      />
     </div>
   );
 }

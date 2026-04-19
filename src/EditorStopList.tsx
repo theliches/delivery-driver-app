@@ -39,6 +39,8 @@ export function EditorStopList(props: {
   incompleteStops: Stop[];
   selectStop: (id: string) => void;
   moveStopInRoute: (id: string, dir: "up" | "down") => void;
+  /** Tryk på stopnr. — åbner numpad til direkte placering */
+  onOpenRoutePositionPicker?: (stopId: string) => void;
   toggleComplete: (id: string) => void;
   copyOneAddress: (
     e: MouseEvent<HTMLButtonElement>,
@@ -53,6 +55,7 @@ export function EditorStopList(props: {
     incompleteStops,
     selectStop,
     moveStopInRoute,
+    onOpenRoutePositionPicker,
     toggleComplete,
     copyOneAddress,
     copiedStopId,
@@ -126,12 +129,22 @@ export function EditorStopList(props: {
                       }`}
                     >
                       <div className="flex min-h-[88px] items-stretch gap-2 px-2 py-2 sm:px-3">
-                        <button
-                          type="button"
-                          onClick={() => selectStop(s.id)}
-                          className="touch-manipulation flex min-w-0 flex-1 items-stretch gap-3 rounded-lg px-2 py-3 text-left transition active:bg-zinc-100 dark:active:bg-white/10"
-                        >
-                          {step != null ? (
+                        <div className="flex min-w-0 flex-1 items-stretch gap-3">
+                          {step != null && showReorder && onOpenRoutePositionPicker ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenRoutePositionPicker(s.id)}
+                              title="Tryk for at vælge nyt stopnr."
+                              className="touch-manipulation flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 border-accent bg-zinc-100 text-accent transition active:scale-[0.97] dark:bg-[#0a1522]"
+                            >
+                              <span className="text-[10px] font-bold uppercase leading-none text-zinc-500 dark:text-white/55">
+                                Nr.
+                              </span>
+                              <span className="text-2xl font-black leading-none">
+                                {step}
+                              </span>
+                            </button>
+                          ) : step != null ? (
                             <span
                               className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 border-accent bg-zinc-100 text-accent dark:bg-[#0a1522]"
                               aria-hidden
@@ -151,7 +164,11 @@ export function EditorStopList(props: {
                               ✓
                             </span>
                           )}
-                          <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => selectStop(s.id)}
+                            className="touch-manipulation flex min-w-0 flex-1 flex-col justify-center gap-1 rounded-lg px-2 py-3 text-left transition active:bg-zinc-100 dark:active:bg-white/10"
+                          >
                             {isActive ? (
                               <span className="text-xs font-black uppercase tracking-wide text-accent">
                                 Valgt · brug NAVIGÉR nedenfor
@@ -185,8 +202,8 @@ export function EditorStopList(props: {
                                 ) : null}
                               </>
                             )}
-                          </div>
-                        </button>
+                          </button>
+                        </div>
                         {showReorder ? (
                           <div
                             className="flex shrink-0 flex-col gap-0.5 self-center"

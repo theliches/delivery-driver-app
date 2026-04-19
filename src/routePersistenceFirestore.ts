@@ -23,6 +23,13 @@ export type FirestoreStop = ParsedAddress & {
   completed: boolean;
 };
 
+/** Hvilken del af appen ruten hører til (adskilte lister på forsiden). */
+export type RouteWorkspace = "route" | "mapOverview";
+
+export function normalizeRouteWorkspace(v: unknown): RouteWorkspace {
+  return v === "mapOverview" ? "mapOverview" : "route";
+}
+
 export type SavedRouteSummary = {
   id: string;
   /** Primær visningslabel i sky-listen (Firestore `name`). */
@@ -32,6 +39,7 @@ export type SavedRouteSummary = {
   routeDate: string;
   stopCount: number;
   updatedAt: Date | null;
+  workspace: RouteWorkspace;
 };
 
 export type SavedRoutePayload = {
@@ -43,6 +51,8 @@ export type SavedRoutePayload = {
   rawInput: string;
   stops: FirestoreStop[];
   activeStopId: string | null;
+  /** Standard `route` (leveringsrute); `mapOverview` vises kun under kortoversigt-listen. */
+  workspace?: RouteWorkspace;
 };
 
 /** I dag som YYYY-MM-DD (lokal kalender). */
@@ -110,6 +120,7 @@ function docToRouteSummary(d: QueryDocumentSnapshot): SavedRouteSummary {
     routeDate,
     stopCount,
     updatedAt: tsToDate(x.updatedAt) ?? tsToDate(x.createdAt),
+    workspace: normalizeRouteWorkspace(x.workspace),
   };
 }
 
@@ -163,6 +174,7 @@ function logRouteWritePayload(
     rawInputLength: rawLen,
     stopsCount: stopsLen,
     activeStopId: base.activeStopId,
+    workspace: base.workspace,
     updatedAt: "[serverTimestamp]",
     createdAt: isCreate
       ? "[serverTimestamp]"
@@ -299,6 +311,7 @@ export async function fetchUserRoute(
       (typeof d.routeName === "string" && d.routeName.trim()
         ? d.routeName.trim()
         : title);
+    const workspace = normalizeRouteWorkspace(d.workspace);
     console.info(ROUTE_LOG, "fetchUserRoute ok", { uid: authUid, path });
     return {
       name,
@@ -308,6 +321,7 @@ export async function fetchUserRoute(
       rawInput,
       stops,
       activeStopId,
+      workspace,
     };
   } catch (e) {
     logFirestoreError("fetchUserRoute", path, e);
@@ -338,6 +352,7 @@ export async function saveUserRoute(
     const nm = data.name.trim().slice(0, 200) || "Ny rute";
     const title =
       (data.title.trim() || nm || "Rute").slice(0, 300);
+    const ws = normalizeRouteWorkspace(data.workspace);
     const base: Record<string, unknown> = {
       name: nm,
       title,
@@ -346,6 +361,7 @@ export async function saveUserRoute(
       rawInput: data.rawInput.slice(0, 280_000),
       stops: data.stops,
       activeStopId: data.activeStopId,
+      workspace: ws,
       updatedAt: serverTimestamp(),
     };
     const isCreate = !existing.exists();
