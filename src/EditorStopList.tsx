@@ -190,6 +190,7 @@ export function EditorStopList(props: {
                         {showReorder ? (
                           <div
                             className="flex shrink-0 flex-col gap-0.5 self-center"
+                            title="Skift kørerækkefølge og stopnr. (Nr.)"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <button

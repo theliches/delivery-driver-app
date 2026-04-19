@@ -291,8 +291,8 @@ export function StopRouteMap(props: {
       <p className="border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] font-semibold leading-snug text-zinc-600 dark:border-white/15 dark:bg-slate-900 dark:text-zinc-400">
         {variant === "overview" ? (
           <>
-            Kun oversigt: tal på kortet for åbne stop følger <span className="font-bold">indtastningsrækkefølgen</span>
-            blandt ikke-leverede. Brug <span className="font-bold">NAVIGÉR</span> og{" "}
+            Tal på kortet for åbne stop følger <span className="font-bold">listen</span> (nr. og
+            pile). Brug <span className="font-bold">NAVIGÉR</span> og{" "}
             <span className="font-bold">Leveret</span> på listen. Punkter justeres via
             OpenStreetMap. Ved samme hus ét punkt med antal. Markør: fremhæv stop.
           </>

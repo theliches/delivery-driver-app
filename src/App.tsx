@@ -59,15 +59,25 @@ function readLsActiveFirebaseRouteId(): string | null {
 
 type AccentId = "orange" | "red" | "green" | "blue";
 
-const ACCENT_PRESETS: Record<
-  AccentId,
-  { label: string; main: string; deep: string }
-> = {
+type AccentPreset = {
+  label: string;
+  main: string;
+  deep: string;
+  /** Diskret neutral til flader/tryk (kun grønt tema har brand-neutral). */
+  surface?: string;
+};
+
+const ACCENT_PRESETS: Record<AccentId, AccentPreset> = {
   orange: { label: "Orange", main: "#FF6B35", deep: "#E85A24" },
   /** Afdæmpet R — ikke neon */
   red: { label: "Rød", main: "#C45C5C", deep: "#9E4545" },
-  /** Afdæmpet G — skovgrøn */
-  green: { label: "Grøn", main: "#2F8F6B", deep: "#247A5A" },
+  /** Brand: #22913A / #186929 / #D6D6D6 */
+  green: {
+    label: "Grøn",
+    main: "#22913A",
+    deep: "#186929",
+    surface: "#D6D6D6",
+  },
   /** Afdæmpet B — stålblå */
   blue: { label: "Blå", main: "#4580C4", deep: "#35649A" },
 };
@@ -229,6 +239,40 @@ function IconArrowLeft({ className }: { className?: string }) {
   );
 }
 
+function IconChevronUp({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      aria-hidden
+    >
+      <path d="M18 15l-6-6-6 6" />
+    </svg>
+  );
+}
+
+function IconChevronDown({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      aria-hidden
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 function isIOSDevice(): boolean {
   return /iPad|iPhone|iPod/i.test(navigator.userAgent);
 }
@@ -317,8 +361,14 @@ export default function App() {
   useLayoutEffect(() => {
     const p = ACCENT_PRESETS[accentId];
     const root = document.documentElement;
+    root.dataset.accent = accentId;
     root.style.setProperty("--accent-rgb", hexToRgbTriplet(p.main));
     root.style.setProperty("--accent-deep-rgb", hexToRgbTriplet(p.deep));
+    if (p.surface) {
+      root.style.setProperty("--accent-surface-rgb", hexToRgbTriplet(p.surface));
+    } else {
+      root.style.removeProperty("--accent-surface-rgb");
+    }
     try {
       localStorage.setItem(ACCENT_KEY, accentId);
     } catch {
@@ -1062,6 +1112,25 @@ export default function App() {
     );
   }, []);
 
+  const moveMapOverviewStopInRoute = useCallback(
+    (stopId: string, direction: "up" | "down") => {
+      setMapOverviewStops((prev) => {
+        const incomplete = prev.filter((x) => !x.completed);
+        const complete = prev.filter((x) => x.completed);
+        const idx = incomplete.findIndex((x) => x.id === stopId);
+        if (idx < 0) return prev;
+        const j = direction === "up" ? idx - 1 : idx + 1;
+        if (j < 0 || j >= incomplete.length) return prev;
+        const nextIncomplete = incomplete.slice();
+        const t = nextIncomplete[idx];
+        nextIncomplete[idx] = nextIncomplete[j]!;
+        nextIncomplete[j] = t!;
+        return [...nextIncomplete, ...complete];
+      });
+    },
+    [],
+  );
+
   const selectStop = (id: string) => setActiveId(id);
 
   const moveStopInRoute = useCallback((stopId: string, direction: "up" | "down") => {
@@ -1132,6 +1201,12 @@ export default function App() {
     () => mapOverviewStops.filter((s) => !s.completed),
     [mapOverviewStops],
   );
+
+  const mapOverviewRouteStepById = useMemo(() => {
+    const m = new Map<string, number>();
+    mapOverviewIncompleteStops.forEach((s, i) => m.set(s.id, i + 1));
+    return m;
+  }, [mapOverviewIncompleteStops]);
 
   const routeStepById = useMemo(() => {
     const m = new Map<string, number>();
@@ -1211,10 +1286,38 @@ export default function App() {
     cloudSyncPhase,
   ]);
 
+  /** Grøn accent: mindre «hvidt» skal (kun det valg); øvrige accenter uændret. */
+  const accentShell = useMemo(() => {
+    if (accentId !== "green") {
+      return {
+        app: "bg-zinc-100 dark:bg-[#070d14]",
+        header:
+          "border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]",
+        drawer:
+          "border-l-2 border-zinc-200 bg-white shadow-2xl dark:border-white/20 dark:bg-[#0d1824]",
+        drawerBar: "border-b-2 border-zinc-200 dark:border-white/15",
+        navFooter:
+          "border-t-2 border-zinc-200 bg-white shadow-[0_-10px_28px_rgba(0,0,0,0.12)] dark:border-white/20 dark:bg-[#0a1522] dark:shadow-[0_-10px_28px_rgba(0,0,0,0.65)]",
+      };
+    }
+    return {
+      app: "bg-[#cfdecc] dark:bg-[#070f0c]",
+      header:
+        "border-b-2 border-[#b0c4b4] bg-[#dfece1] shadow-lg dark:border-white/12 dark:bg-[#0b1513]",
+      drawer:
+        "border-l-2 border-[#b0c4b4] bg-[#e8f2ea] shadow-2xl dark:border-white/12 dark:bg-[#0c1816]",
+      drawerBar: "border-b-2 border-[#b0c4b4] dark:border-white/12",
+      navFooter:
+        "border-t-2 border-[#b0c4b4] bg-[#dfece1] shadow-[0_-10px_28px_rgba(0,0,0,0.12)] dark:border-white/12 dark:bg-[#0b1513] dark:shadow-[0_-10px_28px_rgba(0,0,0,0.65)]",
+    };
+  }, [accentId]);
+
   return (
-    <div className="flex min-h-full flex-col bg-zinc-100 text-zinc-900 dark:bg-[#070d14] dark:text-white">
+    <div
+      className={`flex min-h-full flex-col text-zinc-900 dark:text-white ${accentShell.app}`}
+    >
       {screen === "home" ? (
-        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+        <header className={`sticky top-0 z-20 ${accentShell.header}`}>
           <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-4">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -1254,7 +1357,7 @@ export default function App() {
           </div>
         </header>
       ) : screen === "mapOverview" ? (
-        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+        <header className={`sticky top-0 z-20 ${accentShell.header}`}>
           <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-3">
             <div className="flex items-start gap-2">
               <button
@@ -1306,7 +1409,7 @@ export default function App() {
           </div>
         </header>
       ) : (
-        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+        <header className={`sticky top-0 z-20 ${accentShell.header}`}>
           <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-3">
             <div className="flex items-start gap-2">
               <button
@@ -1395,9 +1498,11 @@ export default function App() {
           />
           <aside
             id="app-drawer-menu"
-            className="relative flex h-full w-full max-w-sm flex-col border-l-2 border-zinc-200 bg-white shadow-2xl dark:border-white/20 dark:bg-[#0d1824]"
+            className={`relative flex h-full w-full max-w-sm flex-col ${accentShell.drawer}`}
           >
-            <div className="flex items-center justify-between gap-2 border-b-2 border-zinc-200 px-4 py-3 dark:border-white/15">
+            <div
+              className={`flex items-center justify-between gap-2 px-4 py-3 ${accentShell.drawerBar}`}
+            >
               <h2
                 id="drawer-menu-title"
                 className="text-lg font-extrabold text-zinc-900 dark:text-white"
@@ -1464,7 +1569,7 @@ export default function App() {
                   })}
                 </div>
                 <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-                  Rød, grøn og blå er dæmpede nuancer — ikke skarpe neontoner.
+                  Rød og blå er dæmpede nuancer; grøn følger brandfarver (22913A / 186929).
                 </p>
               </div>
 
@@ -1804,35 +1909,95 @@ export default function App() {
               aria-label="Rækkefølge som indtastet"
             >
               <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Rækkefølge (kun visning)
+                Rækkefølge — pil ved åbne stop (samme som rute-siden)
               </h2>
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
+                Nr. følger kun <span className="font-semibold">ikke-leverede</span> stop. Pile
+                flytter rækkefølge og opdaterer kortet.
+              </p>
               <ol className="flex list-none flex-col gap-2 p-0">
-                {mapOverviewStops.map((s, index) => {
-                  const n = index + 1;
+                {mapOverviewStops.map((s) => {
+                  const step = mapOverviewRouteStepById.get(s.id);
+                  const routePos = mapOverviewIncompleteStops.findIndex(
+                    (x) => x.id === s.id,
+                  );
+                  const showReorder =
+                    !s.completed &&
+                    step != null &&
+                    mapOverviewIncompleteStops.length >= 2 &&
+                    routePos >= 0;
                   const active = mapOverviewActiveId === s.id;
                   return (
                     <li
                       key={s.id}
-                      className={`flex flex-col gap-3 rounded-xl border-2 px-3 py-3 ${
+                      className={`flex flex-col gap-3 rounded-xl border-2 px-2 py-2 sm:px-3 ${
                         active
                           ? "border-accent bg-accent/15 dark:bg-accent/10"
                           : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
                       } ${s.completed ? "opacity-[0.78] dark:opacity-[0.68]" : ""}`}
                     >
-                      <div className="flex gap-3">
-                        <span
-                          className={`flex size-9 shrink-0 items-center justify-center rounded-full text-sm font-black ${
-                            active
-                              ? "bg-accent text-black"
-                              : "bg-zinc-200 text-zinc-800 dark:bg-slate-700 dark:text-zinc-100"
-                          }`}
-                          aria-hidden
-                        >
-                          {s.completed ? "✓" : n}
-                        </span>
-                        <p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
-                          {formatAddressForNav(s)}
-                        </p>
+                      <div className="flex min-h-[72px] items-stretch gap-2">
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                          {s.completed ? (
+                            <span
+                              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border-2 border-zinc-300 bg-zinc-100 text-lg font-black text-zinc-400 dark:border-white/25 dark:bg-black/30 dark:text-white/50"
+                              aria-hidden
+                            >
+                              ✓
+                            </span>
+                          ) : (
+                            <span
+                              className={`flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border-2 bg-zinc-100 dark:bg-[#0a1522] ${
+                                active
+                                  ? "border-accent text-accent"
+                                  : "border-accent/60 text-accent dark:border-accent/50"
+                              }`}
+                              aria-hidden
+                            >
+                              <span className="text-[10px] font-bold uppercase leading-none text-zinc-500 dark:text-white/55">
+                                Nr.
+                              </span>
+                              <span className="text-2xl font-black leading-none text-zinc-900 dark:text-white">
+                                {step}
+                              </span>
+                            </span>
+                          )}
+                          <p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+                            {formatAddressForNav(s)}
+                          </p>
+                        </div>
+                        {showReorder ? (
+                          <div
+                            className="flex shrink-0 flex-col gap-0.5 self-center"
+                            title="Skift rækkefølge og stopnr. (Nr.)"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              aria-label="Flyt stop op i rækkefølgen"
+                              disabled={routePos <= 0}
+                              onClick={() =>
+                                moveMapOverviewStopInRoute(s.id, "up")
+                              }
+                              className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                            >
+                              <IconChevronUp />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="Flyt stop ned i rækkefølgen"
+                              disabled={
+                                routePos >= mapOverviewIncompleteStops.length - 1
+                              }
+                              onClick={() =>
+                                moveMapOverviewStopInRoute(s.id, "down")
+                              }
+                              className="touch-manipulation flex h-9 w-10 items-center justify-center rounded-lg border-2 border-zinc-300 bg-zinc-100 text-zinc-800 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/30 dark:bg-slate-700 dark:text-zinc-100"
+                            >
+                              <IconChevronDown />
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap gap-2 border-t border-zinc-200 pt-3 dark:border-white/15">
                         <button
@@ -1898,7 +2063,11 @@ export default function App() {
           </span>{" "}
           (OpenStreetMap) eller på et stop i listen for at vælge · derefter{" "}
           <span className="font-bold text-accent">NAVIGÉR</span>
-          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge. Listen er fordelt
+          . Ved åbne stop: brug pile ↑ ↓ for at ændre{" "}
+          <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+            kørerækkefølge og stopnr. (Nr.)
+          </span>{" "}
+          — tallet opdateres med det samme på listen og kortet. Listen er fordelt
           under overskrifter pr. postnr. og by; flere leveringer til samme hus
           vises som ét kort med antal.
         </p>
@@ -2043,7 +2212,9 @@ export default function App() {
       ) : null}
 
       {screen === "editor" ? (
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t-2 border-zinc-200 bg-white p-4 shadow-[0_-10px_28px_rgba(0,0,0,0.12)] dark:border-white/20 dark:bg-[#0a1522] dark:shadow-[0_-10px_28px_rgba(0,0,0,0.65)]">
+      <div
+        className={`fixed bottom-0 left-0 right-0 z-30 p-4 ${accentShell.navFooter}`}
+      >
         <div className="mx-auto max-w-lg">
           <p className="mb-2 line-clamp-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
             {navLabel}

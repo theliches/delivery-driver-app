@@ -19,6 +19,11 @@ body {
   -webkit-tap-highlight-color: rgb(var(--accent-rgb) / 0.28);
 }
 
+/* Grøn accent: lys grå tap (#D6D6D6) — kun når `data-accent` sættes fra App */
+html[data-accent="green"] body {
+  -webkit-tap-highlight-color: rgb(214 214 214 / 0.45);
+}
+
 /* Tailwind preflight sætter img { max-width: 100% }, hvilket bøjer OSM-fliser */
 .leaflet-container img.leaflet-tile {
   max-width: none !important;
