@@ -147,6 +147,51 @@ function primaryRouteLabelFromPayload(r: {
   return typeof r.routeName === "string" ? r.routeName.trim() : "";
 }
 
+/** Valgfrit navn + én kompakt «ny sky-rute»-handling (rute-siden og kortoversigt). */
+function CloudSaveNewRow({
+  inputId,
+  titleValue,
+  onTitleChange,
+  onSave,
+  saveDisabled,
+  buttonTitle,
+}: {
+  inputId: string;
+  titleValue: string;
+  onTitleChange: (v: string) => void;
+  onSave: () => void;
+  saveDisabled: boolean;
+  buttonTitle: string;
+}) {
+  const inputCls =
+    "min-h-[44px] flex-1 touch-manipulation rounded-lg border-2 border-zinc-300 bg-white px-2.5 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 dark:border-white/25 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500";
+  const btnCls =
+    "min-h-[44px] shrink-0 touch-manipulation rounded-lg border-2 border-zinc-500 bg-zinc-100 px-3 text-sm font-extrabold text-zinc-900 transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/40 dark:bg-slate-800 dark:text-zinc-100";
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+      <input
+        id={inputId}
+        type="text"
+        value={titleValue}
+        onChange={(e) => onTitleChange(e.target.value)}
+        maxLength={100}
+        placeholder="Valgfrit navn (sky-listen)"
+        className={inputCls}
+        aria-label="Valgfrit navn på ny sky-rute"
+      />
+      <button
+        type="button"
+        title={buttonTitle}
+        onClick={onSave}
+        disabled={saveDisabled}
+        className={btnCls}
+      >
+        Gem som ny sky-rute
+      </button>
+    </div>
+  );
+}
+
 function IconSun({ className }: { className?: string }) {
   return (
     <svg
@@ -314,6 +359,8 @@ export default function App() {
   const [mapOverviewActiveId, setMapOverviewActiveId] = useState<string | null>(
     null,
   );
+  const [editorSaveAsNewTitle, setEditorSaveAsNewTitle] = useState("");
+  const [mapOverviewCloudTitle, setMapOverviewCloudTitle] = useState("");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -780,6 +827,46 @@ export default function App() {
     setMapOverviewActiveId(null);
   };
 
+  /** Ny sky-rute fra kortoversigt — skifter ikke den aktive rute under «Rute». */
+  const handleSaveMapOverviewToCloud = () => {
+    setCloudMessage(null);
+    if (mapOverviewStops.length === 0) {
+      setCloudMessage("Indlæs adresser først — ingen stop at gemme.");
+      return;
+    }
+    if (!firebaseUid) {
+      if (isFirestoreConfigured()) {
+        setCloudMessage("Log ind med Google for at gemme i skyen.");
+      }
+      return;
+    }
+    const rid = newId();
+    const firstOpen =
+      mapOverviewStops.find((s) => !s.completed)?.id ??
+      mapOverviewStops[0]?.id ??
+      null;
+    const rd = todayIsoLocal();
+    const nm =
+      mapOverviewCloudTitle.trim() ||
+      routeTitleFromStops(mapOverviewStops);
+    void saveUserRoute(firebaseUid, rid, {
+      name: nm.slice(0, 200),
+      title: routeTitleFromStops(mapOverviewStops),
+      routeName: mapOverviewCloudTitle.trim().slice(0, 100),
+      routeDate: rd,
+      rawInput: mapOverviewRawInput,
+      stops: mapOverviewStops,
+      activeStopId: firstOpen,
+    }).then((ok) => {
+      if (ok) {
+        setMapOverviewCloudTitle("");
+        setCloudMessage("Rute gemt i skyen — find den på forsiden.");
+      } else {
+        setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
+      }
+    });
+  };
+
   const handleParse = () => {
     setCopiedStopId(null);
     setRouteOptimizeFeedback(null);
@@ -834,6 +921,7 @@ export default function App() {
     setCopiedStopId(null);
     setRouteOptimizeFeedback(null);
     setOpenRouteDriveKm(null);
+    setCloudMessage(null);
     if (stops.length === 0) {
       setCloudMessage(
         "Du har ingen stop at gemme — indlæs adresser først, eller tilføj stop.",
@@ -854,14 +942,24 @@ export default function App() {
       routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
         ? routeDate
         : todayIsoLocal();
+    const listName = editorSaveAsNewTitle.trim() || "Ny rute";
     void saveUserRoute(firebaseUid, rid, {
-      name: "Ny rute",
+      name: listName.slice(0, 200),
       title: routeTitleFromStops(stops),
-      routeName: routeName.trim(),
+      routeName: (editorSaveAsNewTitle.trim() || routeName.trim()).slice(
+        0,
+        100,
+      ),
       routeDate: rd,
       rawInput,
       stops,
       activeStopId: firstOpen,
+    }).then((ok) => {
+      if (ok) {
+        setEditorSaveAsNewTitle("");
+      } else {
+        setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
+      }
     });
   };
 
@@ -1757,7 +1855,7 @@ export default function App() {
                 {savedRoutes.length === 0 ? (
                   <p className="text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
                     Ingen endnu — tryk «Opret ny rute», indsæt adresser og «Indlæs adresser».
-                    Flere ruter: brug «Som ny rute i sky-listen» under tekstfeltet, eller
+                    Flere ruter: brug «Gem som ny sky-rute» under rute eller kortoversigt, eller
                     opret flere fra forsiden med «Opret ny rute» hver gang.
                   </p>
                 ) : (
@@ -1901,6 +1999,14 @@ export default function App() {
                 Ryd
               </button>
             </div>
+            <CloudSaveNewRow
+              inputId="map-overview-cloud-save-title"
+              titleValue={mapOverviewCloudTitle}
+              onTitleChange={setMapOverviewCloudTitle}
+              onSave={handleSaveMapOverviewToCloud}
+              saveDisabled={mapOverviewStops.length === 0}
+              buttonTitle="Opretter nyt sky-dokument uden at skifte den aktive rute under Rute."
+            />
           </section>
 
           {mapOverviewStops.length > 0 ? (
@@ -2160,20 +2266,14 @@ export default function App() {
               Ryd
             </button>
           </div>
-          <button
-            type="button"
-            onClick={handleSaveAsNewCloudRoute}
-            disabled={stops.length === 0}
-            title="Gemmer den nuværende rute som et nyt dokument i sky-listen."
-            className="w-full touch-manipulation rounded-xl border-2 border-dashed border-zinc-400 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800/80 dark:text-zinc-100"
-          >
-            Som ny rute i sky-listen
-          </button>
-          <p className="text-center text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-            «Indlæs adresser» opdaterer den <span className="font-semibold">aktive</span>{" "}
-            sky-rute. Knappen herunder gemmer <span className="font-semibold">nuværende stop</span>{" "}
-            som et nyt dokument («Ny rute») på forsiden.
-          </p>
+          <CloudSaveNewRow
+            inputId="editor-cloud-save-as-new-title"
+            titleValue={editorSaveAsNewTitle}
+            onTitleChange={setEditorSaveAsNewTitle}
+            onSave={handleSaveAsNewCloudRoute}
+            saveDisabled={stops.length === 0}
+            buttonTitle="Opretter nyt sky-dokument og sætter det som aktiv rute. «Indlæs adresser» opdaterer i stedet den aktive sky-rute."
+          />
           {incompleteStops.length >= 2 && openRouteDriveKm != null && (
             <p className="text-center text-sm font-bold text-zinc-600 dark:text-zinc-400">
               Åbne stop (kørevej, sidst beregnet) ≈{" "}
