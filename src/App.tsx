@@ -393,6 +393,10 @@ export default function App() {
   );
   const [editorSaveAsNewTitle, setEditorSaveAsNewTitle] = useState("");
   const [mapOverviewCloudTitle, setMapOverviewCloudTitle] = useState("");
+  /** Én fælles «Aktiv»-markering på forsiden — følger den skæm, du sidst arbejdede på. */
+  const [highlightedSavedRouteId, setHighlightedSavedRouteId] = useState<
+    string | null
+  >(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -485,6 +489,7 @@ export default function App() {
     if (lsMapRid) {
       setActiveMapOverviewFirestoreRouteId(lsMapRid);
     }
+    setHighlightedSavedRouteId(lsActiveRid ?? lsMapRid ?? null);
     setHydrated(true);
     setScreen("home");
   }, []);
@@ -503,6 +508,7 @@ export default function App() {
         setCloudBootstrapReady(false);
         setFirebaseUid(null);
         setActiveMapOverviewFirestoreRouteId(null);
+        setHighlightedSavedRouteId(null);
         return;
       }
       const uid = user.uid;
@@ -979,6 +985,14 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (screen === "editor" && activeFirestoreRouteId) {
+      setHighlightedSavedRouteId(activeFirestoreRouteId);
+    } else if (screen === "mapOverview" && activeMapOverviewFirestoreRouteId) {
+      setHighlightedSavedRouteId(activeMapOverviewFirestoreRouteId);
+    }
+  }, [screen, activeFirestoreRouteId, activeMapOverviewFirestoreRouteId]);
+
+  useEffect(() => {
     if (!menuOpen) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -1093,6 +1107,94 @@ export default function App() {
       mapOverviewActiveId,
     ]);
 
+  const handleConfirmOverwriteActiveEditorRoute = useCallback(() => {
+    setCloudMessage(null);
+    if (!firebaseUid) {
+      if (isFirestoreConfigured()) {
+        setCloudMessage("Log ind med Google for at gemme.");
+      }
+      return;
+    }
+    const rid = activeFirestoreRouteId;
+    if (!rid) {
+      setCloudMessage(
+        "Indlæs adresser først — der er ikke en aktiv sky-rute at gemme på.",
+      );
+      return;
+    }
+    if (stops.length === 0) {
+      setCloudMessage("Ingen stop at gemme.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "Er du sikker? Det gemmer alt det, du ser nu på den aktive sky-rute (samme dokument under Optimeret ruter på forsiden). Der oprettes ikke et nyt dokument.",
+      )
+    ) {
+      return;
+    }
+    void (async () => {
+      setCloudSyncPhase("syncing");
+      const ok = await flushActiveRouteToCloud();
+      setCloudSyncPhase(ok ? "synced" : "error");
+      if (ok) {
+        setHighlightedSavedRouteId(rid);
+        setCloudMessage("Ruten er opdateret på den aktive sky-rute.");
+      } else {
+        setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
+      }
+    })();
+  }, [
+    firebaseUid,
+    activeFirestoreRouteId,
+    stops.length,
+    flushActiveRouteToCloud,
+  ]);
+
+  const handleConfirmOverwriteActiveMapOverviewRoute = useCallback(() => {
+    setCloudMessage(null);
+    if (!firebaseUid) {
+      if (isFirestoreConfigured()) {
+        setCloudMessage("Log ind med Google for at gemme.");
+      }
+      return;
+    }
+    const rid = activeMapOverviewFirestoreRouteId;
+    if (!rid) {
+      setCloudMessage(
+        "Indlæs adresser først — der er ikke en aktiv sky-rute for kortoversigt.",
+      );
+      return;
+    }
+    if (mapOverviewStops.length === 0) {
+      setCloudMessage("Ingen stop at gemme.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "Er du sikker? Det gemmer alt det, du ser nu på den aktive kortoversigt-rute i skyen (samme dokument under Kortoversigt på forsiden). Der oprettes ikke et nyt dokument.",
+      )
+    ) {
+      return;
+    }
+    void (async () => {
+      setMapOverviewCloudSyncPhase("syncing");
+      const ok = await flushActiveMapOverviewRouteToCloud();
+      setMapOverviewCloudSyncPhase(ok ? "synced" : "error");
+      if (ok) {
+        setHighlightedSavedRouteId(rid);
+        setCloudMessage("Kortoversigten er opdateret på den aktive sky-rute.");
+      } else {
+        setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
+      }
+    })();
+  }, [
+    firebaseUid,
+    activeMapOverviewFirestoreRouteId,
+    mapOverviewStops.length,
+    flushActiveMapOverviewRouteToCloud,
+  ]);
+
   const handleMapOverviewParse = () => {
     const parsed = parseDanishAddresses(mapOverviewRawInput);
     const next = stopsFromParsed(parsed);
@@ -1141,10 +1243,12 @@ export default function App() {
   };
 
   const handleMapOverviewClear = () => {
+    const prevMapRid = activeMapOverviewFirestoreRouteId;
     setMapOverviewRawInput("");
     setMapOverviewStops([]);
     setMapOverviewActiveId(null);
     setActiveMapOverviewFirestoreRouteId(null);
+    setHighlightedSavedRouteId((h) => (h === prevMapRid ? null : h));
     try {
       localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
     } catch {
@@ -1193,7 +1297,7 @@ export default function App() {
           /* ignore */
         }
         setCloudMessage(
-          "Rute gemt under «Kortoversigt» på forsiden — ikke blandet med leveringsruter.",
+          "Rute gemt under «Kortoversigt» på forsiden — ikke blandet med optimerede ruter.",
         );
       } else {
         setCloudMessage("Kunne ikke gemme — tjek netværk og prøv igen.");
@@ -1305,7 +1409,7 @@ export default function App() {
       if (!firebaseUid) return;
       if (r.workspace === "mapOverview") {
         setCloudMessage(
-          "Den rute hører til kortoversigt — åbn den under «Kortoversigt i skyen» på forsiden.",
+          "Den rute hører til kortoversigt — åbn den under «Kortoversigt» på forsiden.",
         );
         return;
       }
@@ -1316,7 +1420,7 @@ export default function App() {
       }
       if (data.workspace === "mapOverview") {
         setCloudMessage(
-          "Den rute hører til kortoversigt — åbn den under «Kortoversigt i skyen» på forsiden.",
+          "Den rute hører til kortoversigt — åbn den under «Kortoversigt» på forsiden.",
         );
         return;
       }
@@ -1352,7 +1456,7 @@ export default function App() {
       if (!firebaseUid) return;
       if (r.workspace !== "mapOverview") {
         setCloudMessage(
-          "Den rute er en leveringsrute — åbn den under «Leveringsruter i skyen» på forsiden.",
+          "Den rute er en optimeret rute — åbn den under «Optimeret ruter» på forsiden.",
         );
         return;
       }
@@ -1363,7 +1467,7 @@ export default function App() {
       }
       if (data.workspace !== "mapOverview") {
         setCloudMessage(
-          "Den rute er en leveringsrute — åbn den under «Leveringsruter i skyen» på forsiden.",
+          "Den rute er en optimeret rute — åbn den under «Optimeret ruter» på forsiden.",
         );
         return;
       }
@@ -1397,6 +1501,7 @@ export default function App() {
     setMapOverviewStops(cloned);
     ensureMapOverviewActive(cloned);
     setActiveMapOverviewFirestoreRouteId(null);
+    setHighlightedSavedRouteId(null);
     try {
       localStorage.removeItem(ACTIVE_FIREBASE_MAPOVERVIEW_ROUTE_LS);
     } catch {
@@ -1416,6 +1521,7 @@ export default function App() {
     setStops(cloned);
     ensureActive(cloned);
     setActiveFirestoreRouteId(null);
+    setHighlightedSavedRouteId(null);
     try {
       localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
     } catch {
@@ -1471,6 +1577,7 @@ export default function App() {
     setRouteName("");
     setRouteDate(todayIsoLocal());
     setActiveFirestoreRouteId(null);
+    setHighlightedSavedRouteId(null);
     localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
     localStorage.removeItem(LS_KEY);
     setMenuOpen(false);
@@ -1513,6 +1620,7 @@ export default function App() {
         return;
       }
       setCloudMessage(null);
+      setHighlightedSavedRouteId((h) => (h === r.id ? null : h));
       if (activeFirestoreRouteId === r.id) {
         startNewActiveRoute();
       }
@@ -1633,6 +1741,7 @@ export default function App() {
   };
 
   const handleClear = () => {
+    const prevRid = activeFirestoreRouteId;
     setRouteOptimizeFeedback(null);
     setOpenRouteDriveKm(null);
     setRawInput("");
@@ -1641,6 +1750,7 @@ export default function App() {
     setRouteName("");
     setRouteDate(todayIsoLocal());
     setActiveFirestoreRouteId(null);
+    setHighlightedSavedRouteId((h) => (h === prevRid ? null : h));
     localStorage.removeItem(LS_KEY);
     localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
   };
@@ -1816,8 +1926,8 @@ export default function App() {
     if (!activeMapOverviewFirestoreRouteId) {
       return (
         <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-          Efter «Indlæs adresser» oprettes et separat sky-dokument — ikke blandet med
-          leveringsruten.
+          Efter «Indlæs adresser» oprettes et separat sky-dokument — ikke blandet med den
+          optimerede rute.
         </p>
       );
     }
@@ -2086,7 +2196,7 @@ export default function App() {
                   {activeFirestoreRouteId ? "Rediger rute" : "Opret ny rute"}
                 </h1>
                 <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  Gemmes i skyen som leveringsrute — kortoversigt har sin egen liste på forsiden
+                  Gemmes i skyen under Optimeret ruter — kortoversigt har sin egen liste på forsiden
                 </p>
                 {cloudSyncBanner ? (
                   <div
@@ -2393,8 +2503,10 @@ export default function App() {
             </p>
           ) : null}
           <p className="text-center text-sm font-medium leading-snug text-zinc-600 dark:text-zinc-400">
-            Ændringer gemmes <span className="font-semibold">automatisk i skyen</span> kort
-            efter du har indlæst adresser — du behøver ikke en «gem»-knap.
+            Ændringer synkroniseres <span className="font-semibold">automatisk i skyen</span> kort
+            efter «Indlæs adresser». Brug <span className="font-semibold">Gem</span> på rute- eller
+            kortoversigt-siden hvis du vil overskrive den aktive sky-rute med det samme (med
+            bekræftelse).
           </p>
           {cloudSyncBanner ? (
             <div
@@ -2414,7 +2526,12 @@ export default function App() {
           {stops.length > 0 ? (
             <button
               type="button"
-              onClick={() => setScreen("editor")}
+              onClick={() => {
+                if (activeFirestoreRouteId) {
+                  setHighlightedSavedRouteId(activeFirestoreRouteId);
+                }
+                setScreen("editor");
+              }}
               className="min-h-[52px] w-full touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
             >
               Fortsæt seneste rute ({stops.length} stop)
@@ -2427,8 +2544,9 @@ export default function App() {
                 Sky-gemte ruter
               </p>
               <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
-                To adskilte lister — leveringsruter vises ikke under kortoversigt og omvendt.
-                Brug menu «Overfør …» for at kopiere mellem sider uden at flytte sky-lager.
+                To adskilte lister — kun <span className="font-semibold">én</span> rute vises som
+                «Aktiv» ad gangen (den skæm, du sidst brugte). Brug menu «Overfør …» for kladde
+                mellem sider uden at flytte sky-lager.
               </p>
             </div>
             {firebaseUid ? (
@@ -2454,16 +2572,16 @@ export default function App() {
 
                 <div className="flex flex-col gap-2">
                   <p className="text-[11px] font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                    Leveringsruter
+                    Optimeret ruter
                   </p>
                   {savedRoutesForEditor.length === 0 ? (
                     <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
-                      Ingen leveringsruter i skyen endnu.
+                      Ingen optimerede ruter i skyen endnu.
                     </p>
                   ) : (
                     <ul className="flex flex-col gap-2">
                       {savedRoutesForEditor.map((r) => {
-                        const isActive = r.id === activeFirestoreRouteId;
+                        const isActive = r.id === highlightedSavedRouteId;
                         const headline =
                           r.name.trim() ||
                           r.routeName.trim() ||
@@ -2520,7 +2638,7 @@ export default function App() {
 
                 <div className="flex flex-col gap-2 border-t border-zinc-200 pt-4 dark:border-white/15">
                   <p className="text-[11px] font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                    Kortoversigt i skyen
+                    Kortoversigt
                   </p>
                   {savedRoutesForMapOverview.length === 0 ? (
                     <p className="text-xs font-medium text-zinc-500 dark:text-zinc-500">
@@ -2529,7 +2647,7 @@ export default function App() {
                   ) : (
                     <ul className="flex flex-col gap-2">
                       {savedRoutesForMapOverview.map((r) => {
-                        const isActive = r.id === activeMapOverviewFirestoreRouteId;
+                        const isActive = r.id === highlightedSavedRouteId;
                         const headline =
                           r.name.trim() ||
                           r.routeName.trim() ||
@@ -2671,13 +2789,26 @@ export default function App() {
                 Ryd
               </button>
             </div>
+            <button
+              type="button"
+              onClick={handleConfirmOverwriteActiveMapOverviewRoute}
+              disabled={
+                !firebaseUid ||
+                !activeMapOverviewFirestoreRouteId ||
+                mapOverviewStops.length === 0
+              }
+              title="Overskriver det aktive sky-dokument under Kortoversigt på forsiden (med bekræftelse)."
+              className="min-h-[48px] w-full touch-manipulation rounded-xl border-2 border-zinc-600 bg-zinc-200 px-4 text-sm font-extrabold text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/40 dark:bg-slate-700 dark:text-white"
+            >
+              Gem (aktiv sky-rute)
+            </button>
             <CloudSaveNewRow
               inputId="map-overview-cloud-save-title"
               titleValue={mapOverviewCloudTitle}
               onTitleChange={setMapOverviewCloudTitle}
               onSave={handleSaveMapOverviewToCloud}
               saveDisabled={mapOverviewStops.length === 0}
-              buttonTitle="Opretter nyt sky-dokument uden at skifte den aktive rute under Rute."
+              buttonTitle="Opretter et ekstra sky-dokument under Kortoversigt. Til daglig: brug «Gem (aktiv sky-rute)» for at overskrive uden nyt dokument."
             />
           </section>
 
@@ -2962,13 +3093,26 @@ export default function App() {
               Ryd
             </button>
           </div>
+          <button
+            type="button"
+            onClick={handleConfirmOverwriteActiveEditorRoute}
+            disabled={
+              !firebaseUid ||
+              !activeFirestoreRouteId ||
+              stops.length === 0
+            }
+            title="Overskriver det aktive sky-dokument under Optimeret ruter (med bekræftelse)."
+            className="min-h-[48px] w-full touch-manipulation rounded-xl border-2 border-zinc-600 bg-zinc-200 px-4 text-sm font-extrabold text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/40 dark:bg-slate-700 dark:text-white"
+          >
+            Gem (aktiv sky-rute)
+          </button>
           <CloudSaveNewRow
             inputId="editor-cloud-save-as-new-title"
             titleValue={editorSaveAsNewTitle}
             onTitleChange={setEditorSaveAsNewTitle}
             onSave={handleSaveAsNewCloudRoute}
             saveDisabled={stops.length === 0}
-            buttonTitle="Opretter nyt sky-dokument og sætter det som aktiv rute. «Indlæs adresser» opdaterer i stedet den aktive sky-rute."
+            buttonTitle="Opretter et ekstra sky-dokument under Optimeret ruter og sætter det som aktiv rute. Til daglig: brug «Gem (aktiv sky-rute)» for at overskrive uden nyt dokument."
           />
           {incompleteStops.length >= 2 && openRouteDriveKm != null && (
             <p className="text-center text-sm font-bold text-zinc-600 dark:text-zinc-400">
