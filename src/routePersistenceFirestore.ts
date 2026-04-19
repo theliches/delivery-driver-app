@@ -14,7 +14,7 @@ import {
   type Timestamp,
   type Unsubscribe,
 } from "firebase/firestore";
-import { getFirestoreDb } from "./firebaseApp";
+import { getFirebaseAuth, getFirestoreDb } from "./firebaseApp";
 import type { ParsedAddress } from "./addressParser";
 
 export type FirestoreStop = ParsedAddress & {
@@ -24,6 +24,8 @@ export type FirestoreStop = ParsedAddress & {
 
 export type SavedRouteSummary = {
   id: string;
+  /** Primær visningslabel i sky-listen (Firestore `name`). */
+  name: string;
   title: string;
   routeName: string;
   routeDate: string;
@@ -32,6 +34,8 @@ export type SavedRouteSummary = {
 };
 
 export type SavedRoutePayload = {
+  /** Vises i sky-listen; kræves i Firestore-reglerne. */
+  name: string;
   title: string;
   routeName: string;
   routeDate: string;
@@ -83,7 +87,13 @@ function tsToDate(v: unknown): Date | null {
 
 function docToRouteSummary(d: QueryDocumentSnapshot): SavedRouteSummary {
   const x = d.data() as Record<string, unknown>;
-  const title = typeof x.title === "string" ? x.title : "Rute";
+  const name = typeof x.name === "string" ? x.name : "";
+  const title =
+    typeof x.title === "string"
+      ? x.title
+      : name
+        ? name
+        : "Rute";
   const routeName = typeof x.routeName === "string" ? x.routeName : "";
   const routeDateRaw = typeof x.routeDate === "string" ? x.routeDate : "";
   const routeDate = /^\d{4}-\d{2}-\d{2}$/.test(routeDateRaw)
@@ -93,6 +103,7 @@ function docToRouteSummary(d: QueryDocumentSnapshot): SavedRouteSummary {
   const stopCount = Array.isArray(stops) ? stops.length : 0;
   return {
     id: d.id,
+    name: name.slice(0, 120),
     title: title.slice(0, 120),
     routeName: routeName.slice(0, 100),
     routeDate,
@@ -104,6 +115,77 @@ function docToRouteSummary(d: QueryDocumentSnapshot): SavedRouteSummary {
 const ROUTE_LIST_LIMIT = 40;
 /** Max antal dokumenter der hentes (sorteres i app’en). */
 const ROUTE_FETCH_CAP = 200;
+
+const ROUTE_LOG = "[delivery-driver routes]";
+
+/** Sti og skrivninger må kun bruge Firebase Auth’s uid — aldrig før bruger er logget ind. */
+function getAuthenticatedUid(
+  callerUid: string | undefined,
+  op: string,
+): string | null {
+  const auth = getFirebaseAuth();
+  const uid = auth?.currentUser?.uid ?? null;
+  if (!uid) {
+    console.warn(ROUTE_LOG, "NOT AUTHENTICATED", { op });
+    return null;
+  }
+  if (callerUid != null && callerUid !== uid) {
+    console.warn(ROUTE_LOG, "UID_MISMATCH — bruger auth.currentUser.uid til sti", {
+      op,
+      callerUid,
+      authUid: uid,
+    });
+  }
+  return uid;
+}
+
+function routeDocumentPath(uid: string, routeId: string): string {
+  return `users/${uid}/routes/${routeId}`;
+}
+
+/** Log (uden FieldValue-objekter) — egnet til Vercel / browser console. */
+function logRouteWritePayload(
+  path: string,
+  base: Record<string, unknown>,
+  isCreate: boolean,
+): void {
+  const rawLen =
+    typeof base.rawInput === "string" ? base.rawInput.length : 0;
+  const stopsLen = Array.isArray(base.stops) ? base.stops.length : 0;
+  console.info(ROUTE_LOG, "write payload", {
+    path,
+    keys: Object.keys(base),
+    name: base.name,
+    title: base.title,
+    routeName: base.routeName,
+    routeDate: base.routeDate,
+    rawInputLength: rawLen,
+    stopsCount: stopsLen,
+    activeStopId: base.activeStopId,
+    updatedAt: "[serverTimestamp]",
+    createdAt: isCreate
+      ? "[serverTimestamp]"
+      : "(kun merge-felter — createdAt sættes ikke igen)",
+  });
+}
+
+function logFirestoreError(op: string, path: string, err: unknown): void {
+  const code =
+    err && typeof err === "object" && "code" in err
+      ? String((err as { code?: string }).code)
+      : undefined;
+  const message =
+    err && typeof err === "object" && "message" in err
+      ? String((err as { message?: string }).message)
+      : String(err);
+  console.error(ROUTE_LOG, "Firestore error", {
+    op,
+    path,
+    code,
+    message,
+    err,
+  });
+}
 
 function sortSummariesNewestFirst(list: SavedRouteSummary[]): SavedRouteSummary[] {
   return [...list].sort(
@@ -119,9 +201,12 @@ function sortSummariesNewestFirst(list: SavedRouteSummary[]): SavedRouteSummary[
 export async function fetchUserRouteSummaries(
   uid: string,
 ): Promise<SavedRouteSummary[]> {
+  const authUid = getAuthenticatedUid(uid, "fetchUserRouteSummaries");
+  if (!authUid) return [];
   const db = getFirestoreDb();
   if (!db) return [];
-  const coll = routesColl(db, uid);
+  const coll = routesColl(db, authUid);
+  const pathPrefix = `users/${authUid}/routes`;
   try {
     const q = query(
       coll,
@@ -129,12 +214,23 @@ export async function fetchUserRouteSummaries(
       limit(ROUTE_LIST_LIMIT),
     );
     const snap = await getDocs(q);
+    console.info(ROUTE_LOG, "fetchUserRouteSummaries ok", {
+      uid: authUid,
+      path: pathPrefix,
+      count: snap.docs.length,
+    });
     return snap.docs.map(docToRouteSummary);
-  } catch {
+  } catch (e) {
+    logFirestoreError("fetchUserRouteSummaries", pathPrefix, e);
     const q2 = query(coll, limit(ROUTE_FETCH_CAP));
-    const snap = await getDocs(q2);
-    const list = sortSummariesNewestFirst(snap.docs.map(docToRouteSummary));
-    return list.slice(0, ROUTE_LIST_LIMIT);
+    try {
+      const snap = await getDocs(q2);
+      const list = sortSummariesNewestFirst(snap.docs.map(docToRouteSummary));
+      return list.slice(0, ROUTE_LIST_LIMIT);
+    } catch (e2) {
+      logFirestoreError("fetchUserRouteSummaries(fallback)", pathPrefix, e2);
+      return [];
+    }
   }
 }
 
@@ -147,14 +243,19 @@ export async function fetchUserRoute(
   uid: string,
   routeId: string,
 ): Promise<SavedRoutePayload | null> {
+  const authUid = getAuthenticatedUid(uid, "fetchUserRoute");
+  if (!authUid) return null;
   const db = getFirestoreDb();
   if (!db) return null;
+  const path = routeDocumentPath(authUid, routeId);
   try {
-    const snap = await getDoc(routeDocRef(db, uid, routeId));
+    const snap = await getDoc(routeDocRef(db, authUid, routeId));
     if (!snap.exists()) return null;
     const d = snap.data() as Record<string, unknown>;
     const rawInput = typeof d.rawInput === "string" ? d.rawInput : "";
-    const title = typeof d.title === "string" ? d.title : "Rute";
+    const nm = typeof d.name === "string" ? d.name : "";
+    const title =
+      typeof d.title === "string" ? d.title : nm ? nm : "Rute";
     const routeName = typeof d.routeName === "string" ? d.routeName : "";
     const routeDateRaw = typeof d.routeDate === "string" ? d.routeDate : "";
     const routeDate = /^\d{4}-\d{2}-\d{2}$/.test(routeDateRaw)
@@ -189,8 +290,23 @@ export async function fetchUserRoute(
         };
       })
       .filter((s): s is FirestoreStop => s != null);
-    return { title, routeName, routeDate, rawInput, stops, activeStopId };
-  } catch {
+    const name =
+      nm ||
+      (typeof d.routeName === "string" && d.routeName.trim()
+        ? d.routeName.trim()
+        : title);
+    console.info(ROUTE_LOG, "fetchUserRoute ok", { uid: authUid, path });
+    return {
+      name,
+      title,
+      routeName,
+      routeDate,
+      rawInput,
+      stops,
+      activeStopId,
+    };
+  } catch (e) {
+    logFirestoreError("fetchUserRoute", path, e);
     return null;
   }
 }
@@ -200,17 +316,27 @@ export async function saveUserRoute(
   routeId: string,
   data: SavedRoutePayload,
 ): Promise<boolean> {
+  const authUid = getAuthenticatedUid(uid, "saveUserRoute");
+  if (!authUid) return false;
   const db = getFirestoreDb();
-  if (!db) return false;
+  if (!db) {
+    console.warn(ROUTE_LOG, "NO_DB", { op: "saveUserRoute" });
+    return false;
+  }
+  const path = routeDocumentPath(authUid, routeId);
+  const ref = routeDocRef(db, authUid, routeId);
   try {
-    const ref = routeDocRef(db, uid, routeId);
     const existing = await getDoc(ref);
     const rd =
       /^\d{4}-\d{2}-\d{2}$/.test(data.routeDate)
         ? data.routeDate
         : todayIsoLocal();
+    const nm = data.name.trim().slice(0, 200) || "Ny rute";
+    const title =
+      (data.title.trim() || nm || "Rute").slice(0, 300);
     const base: Record<string, unknown> = {
-      title: data.title.slice(0, 200),
+      name: nm,
+      title,
       routeName: data.routeName.trim().slice(0, 100),
       routeDate: rd,
       rawInput: data.rawInput.slice(0, 280_000),
@@ -218,12 +344,21 @@ export async function saveUserRoute(
       activeStopId: data.activeStopId,
       updatedAt: serverTimestamp(),
     };
-    if (!existing.exists()) {
+    const isCreate = !existing.exists();
+    if (isCreate) {
       base.createdAt = serverTimestamp();
     }
+    console.info(ROUTE_LOG, "saveUserRoute start", {
+      uid: authUid,
+      path,
+      isCreate,
+    });
+    logRouteWritePayload(path, base, isCreate);
     await setDoc(ref, base, { merge: true });
+    console.info(ROUTE_LOG, "saveUserRoute ok", { uid: authUid, path, isCreate });
     return true;
-  } catch {
+  } catch (e) {
+    logFirestoreError("saveUserRoute", path, e);
     return false;
   }
 }
@@ -233,18 +368,31 @@ export function subscribeUserRouteSummaries(
   onList: (routes: SavedRouteSummary[]) => void,
   onError?: (e: unknown) => void,
 ): Unsubscribe {
+  const authUid = getAuthenticatedUid(uid, "subscribeUserRouteSummaries");
+  if (!authUid) {
+    onList([]);
+    return () => {};
+  }
   const db = getFirestoreDb();
   if (!db) {
     onList([]);
     return () => {};
   }
-  const q = query(routesColl(db, uid), limit(ROUTE_FETCH_CAP));
+  const pathPrefix = `users/${authUid}/routes`;
+  const q = query(routesColl(db, authUid), limit(ROUTE_FETCH_CAP));
+  console.info(ROUTE_LOG, "subscribeUserRouteSummaries", {
+    uid: authUid,
+    path: pathPrefix,
+  });
   return onSnapshot(
     q,
     (snap) => {
       const list = sortSummariesNewestFirst(snap.docs.map(docToRouteSummary));
       onList(list.slice(0, ROUTE_LIST_LIMIT));
     },
-    (err) => onError?.(err),
+    (err) => {
+      logFirestoreError("subscribeUserRouteSummaries", pathPrefix, err);
+      onError?.(err);
+    },
   );
 }

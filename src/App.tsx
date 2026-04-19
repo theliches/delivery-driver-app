@@ -3,9 +3,11 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent,
 } from "react";
+import { onAuthStateChanged } from "firebase/auth";
 import {
   formatAddressForNav,
   parseDanishAddresses,
@@ -22,7 +24,12 @@ import { optimizeRouteWithStats } from "./routeOptimizer";
 import { copyTextToClipboard } from "./clipboardWrite";
 import { optimizeRouteByRoadWithStats } from "./roadRouting";
 import { MAX_STOPS_PER_ROUTE } from "./routeConstants";
-import { ensureAnonUser, isFirestoreConfigured } from "./firebaseApp";
+import {
+  getFirebaseAuth,
+  isFirestoreConfigured,
+  signInWithGoogle,
+  signOutUser,
+} from "./firebaseApp";
 import {
   fetchUserRoute,
   fetchUserRouteSummaries,
@@ -39,6 +46,7 @@ const LS_KEY = "delivery-driver-route-v1";
 const THEME_KEY = "delivery-driver-theme";
 const ACCENT_KEY = "delivery-driver-accent";
 const ACTIVE_FIREBASE_ROUTE_LS = "delivery-driver-firebase-active-route-id";
+const LOCAL_TO_CLOUD_SEED_PREFIX = "delivery-driver-local-seeded-";
 
 type AccentId = "orange" | "red" | "green" | "blue";
 
@@ -106,6 +114,16 @@ function loadPersisted(): Persisted | null {
 
 function savePersisted(data: Persisted): void {
   localStorage.setItem(LS_KEY, JSON.stringify(data));
+}
+
+/** Sky-rute: Firestore `name` er primær visning; `routeName` er sekundær. */
+function primaryRouteLabelFromPayload(r: {
+  name: string;
+  routeName: string;
+}): string {
+  const n = typeof r.name === "string" ? r.name.trim() : "";
+  if (n) return n;
+  return typeof r.routeName === "string" ? r.routeName.trim() : "";
 }
 
 function IconSun({ className }: { className?: string }) {
@@ -309,6 +327,13 @@ export default function App() {
 
   const [cloudSyncPhase, setCloudSyncPhase] =
     useState<CloudSyncPhase>("idle");
+  /** Først `true` når auth-bootstrap (restore/seed) er færdig — undgår race med auto-attach. */
+  const [cloudBootstrapReady, setCloudBootstrapReady] = useState(false);
+  const cloudBootstrapDoneForUid = useRef<string | null>(null);
+  const cloudBootstrapGeneration = useRef(0);
+  const cloudRouteAttachLock = useRef(false);
+  /** Auto-attach: stop efter gentagne fejl (undgår uendelig løkke); nulstilles ved uid/stoplængde-ændring. */
+  const cloudAutoAttachFailCount = useRef(0);
 
   useLayoutEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -332,94 +357,113 @@ export default function App() {
   }, [accentId]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const user = await ensureAnonUser();
-      if (cancelled) return;
-      if (user) {
-        setFirebaseUid(user.uid);
-        setCloudMessage(null);
-      } else {
+    const p = loadPersisted();
+    if (p) {
+      setRawInput(p.rawInput ?? "");
+      setStops(p.stops ?? []);
+      setActiveId(p.activeId ?? null);
+      setRouteName(typeof p.routeName === "string" ? p.routeName : "");
+      setRouteDate(
+        p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
+          ? p.routeDate
+          : todayIsoLocal(),
+      );
+    }
+    setHydrated(true);
+    setScreen("home");
+  }, []);
+
+  useEffect(() => {
+    const auth = getFirebaseAuth();
+    if (!isFirestoreConfigured() || !auth) {
+      setFirebaseUid(null);
+      return;
+    }
+    return onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        cloudBootstrapDoneForUid.current = null;
+        cloudBootstrapGeneration.current += 1;
+        setCloudBootstrapReady(false);
         setFirebaseUid(null);
-        if (isFirestoreConfigured()) {
-          setCloudMessage(
-            "Kunne ikke logge på skyen (anonym). Tjek internet — og at Anonymous sign-in er slået til under Firebase → Authentication.",
-          );
+        return;
+      }
+      const uid = user.uid;
+      setFirebaseUid(uid);
+      if (cloudBootstrapDoneForUid.current === uid) return;
+      cloudBootstrapDoneForUid.current = uid;
+      cloudBootstrapGeneration.current += 1;
+      const bootstrapGen = cloudBootstrapGeneration.current;
+      setCloudBootstrapReady(false);
+      void (async () => {
+        try {
+          setCloudMessage(null);
+          let activeRid = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
+          if (activeRid) {
+            const remote = await fetchUserRoute(uid, activeRid);
+            if (remote) {
+              setRawInput(remote.rawInput);
+              setStops(remote.stops as Stop[]);
+              setRouteName(primaryRouteLabelFromPayload(remote));
+              setRouteDate(
+                remote.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(remote.routeDate)
+                  ? remote.routeDate
+                  : todayIsoLocal(),
+              );
+              const nextActive =
+                remote.activeStopId &&
+                remote.stops.some((s) => s.id === remote.activeStopId)
+                  ? remote.activeStopId
+                  : remote.stops.find((s) => !s.completed)?.id ??
+                    remote.stops[0]?.id ??
+                    null;
+              setActiveId(nextActive);
+              setActiveFirestoreRouteId(activeRid);
+              return;
+            }
+            localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
+            activeRid = null;
+          }
+          const p = loadPersisted();
+          const seedKey = `${LOCAL_TO_CLOUD_SEED_PREFIX}${uid}`;
+          if (
+            !activeRid &&
+            !localStorage.getItem(seedKey) &&
+            p &&
+            (p.stops?.length ?? 0) > 0
+          ) {
+            const st = p.stops ?? [];
+            const aid =
+              p.activeId && st.some((s) => s.id === p.activeId)
+                ? p.activeId
+                : st.find((s) => !s.completed)?.id ?? st[0]?.id ?? null;
+            const rd =
+              p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
+                ? p.routeDate
+                : todayIsoLocal();
+            const nm =
+              typeof p.routeName === "string" && p.routeName.trim()
+                ? p.routeName.trim()
+                : routeTitleFromStops(st);
+            const rid = newId();
+            await saveUserRoute(uid, rid, {
+              name: nm,
+              title: routeTitleFromStops(st),
+              routeName: typeof p.routeName === "string" ? p.routeName : "",
+              routeDate: rd,
+              rawInput: p.rawInput ?? "",
+              stops: st,
+              activeStopId: aid,
+            });
+            localStorage.setItem(seedKey, "1");
+            setActiveFirestoreRouteId(rid);
+          }
+        } finally {
+          if (cloudBootstrapGeneration.current === bootstrapGen) {
+            setCloudBootstrapReady(true);
+          }
         }
-      }
-
-      let activeRid = localStorage.getItem(ACTIVE_FIREBASE_ROUTE_LS);
-      if (user && activeRid) {
-        const remote = await fetchUserRoute(user.uid, activeRid);
-        if (!cancelled && remote) {
-          setRawInput(remote.rawInput);
-          setStops(remote.stops as Stop[]);
-          setRouteName(remote.routeName ?? "");
-          setRouteDate(
-            remote.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(remote.routeDate)
-              ? remote.routeDate
-              : todayIsoLocal(),
-          );
-          const nextActive =
-            remote.activeStopId &&
-            remote.stops.some((s) => s.id === remote.activeStopId)
-              ? remote.activeStopId
-              : remote.stops.find((s) => !s.completed)?.id ??
-                remote.stops[0]?.id ??
-                null;
-          setActiveId(nextActive);
-          setActiveFirestoreRouteId(activeRid);
-          setHydrated(true);
-          setScreen("home");
-          return;
-        }
-        if (!cancelled) {
-          localStorage.removeItem(ACTIVE_FIREBASE_ROUTE_LS);
-          activeRid = null;
-        }
-      }
-
-      const p = loadPersisted();
-      if (!cancelled && p) {
-        setRawInput(p.rawInput ?? "");
-        setStops(p.stops ?? []);
-        setActiveId(p.activeId ?? null);
-        setRouteName(typeof p.routeName === "string" ? p.routeName : "");
-        setRouteDate(
-          p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
-            ? p.routeDate
-            : todayIsoLocal(),
-        );
-      }
-      if (!cancelled && user && !activeRid && p && (p.stops?.length ?? 0) > 0) {
-        const st = p.stops ?? [];
-        const aid =
-          p.activeId && st.some((s) => s.id === p.activeId)
-            ? p.activeId
-            : st.find((s) => !s.completed)?.id ?? st[0]?.id ?? null;
-        const rid = newId();
-        await saveUserRoute(user.uid, rid, {
-          title: routeTitleFromStops(st),
-          routeName:
-            typeof p.routeName === "string" ? p.routeName : "",
-          routeDate:
-            p.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(p.routeDate)
-              ? p.routeDate
-              : todayIsoLocal(),
-          rawInput: p.rawInput ?? "",
-          stops: st,
-          activeStopId: aid,
-        });
-        if (!cancelled) setActiveFirestoreRouteId(rid);
-      }
-      if (!cancelled) {
-        setHydrated(true);
-        setScreen("home");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      })();
+    });
   }, []);
 
   useEffect(() => {
@@ -433,6 +477,73 @@ export default function App() {
       () => setCloudMessage("Kunne ikke hente rute-liste fra skyen."),
     );
   }, [firebaseUid]);
+
+  useEffect(() => {
+    if (!firebaseUid) {
+      cloudRouteAttachLock.current = false;
+      cloudAutoAttachFailCount.current = 0;
+    }
+  }, [firebaseUid]);
+
+  useEffect(() => {
+    cloudAutoAttachFailCount.current = 0;
+    if (stops.length === 0) {
+      cloudRouteAttachLock.current = false;
+    }
+  }, [stops.length]);
+
+  /** Efter bootstrap: opret sky-dokument under `users/{uid}/routes/{id}` hvis der stadig mangler ét. */
+  useEffect(() => {
+    if (
+      !hydrated ||
+      !cloudBootstrapReady ||
+      !firebaseUid ||
+      activeFirestoreRouteId ||
+      stops.length === 0
+    ) {
+      return;
+    }
+    if (cloudAutoAttachFailCount.current >= 6) return;
+    if (cloudRouteAttachLock.current) return;
+    cloudRouteAttachLock.current = true;
+    const rid = newId();
+    setActiveFirestoreRouteId(rid);
+    const rd =
+      routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+        ? routeDate
+        : todayIsoLocal();
+    const nm = routeName.trim() || routeTitleFromStops(stops);
+    void saveUserRoute(firebaseUid, rid, {
+      name: nm,
+      title: routeTitleFromStops(stops),
+      routeName: routeName.trim(),
+      routeDate: rd,
+      rawInput,
+      stops,
+      activeStopId: activeId,
+    }).then((ok) => {
+      if (ok) {
+        cloudAutoAttachFailCount.current = 0;
+        return;
+      }
+      cloudAutoAttachFailCount.current += 1;
+      setCloudMessage(
+        "Kunne ikke oprette rute i skyen. Deploy `firestore.rules` med `match /users/{userId}/routes/{routeId}` (timestamps + ejerskab).",
+      );
+      setActiveFirestoreRouteId(null);
+      cloudRouteAttachLock.current = false;
+    });
+  }, [
+    hydrated,
+    cloudBootstrapReady,
+    firebaseUid,
+    activeFirestoreRouteId,
+    stops,
+    routeName,
+    routeDate,
+    rawInput,
+    activeId,
+  ]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -461,7 +572,10 @@ export default function App() {
           routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
             ? routeDate
             : todayIsoLocal();
+        const nm =
+          routeName.trim() || routeTitleFromStops(stops);
         const ok = await saveUserRoute(firebaseUid, activeFirestoreRouteId, {
+          name: nm,
           title: routeTitleFromStops(stops),
           routeName: routeName.trim(),
           routeDate: rd,
@@ -470,6 +584,11 @@ export default function App() {
           activeStopId: activeId,
         });
         setCloudSyncPhase(ok ? "synced" : "error");
+        if (!ok) {
+          setCloudMessage(
+            "Sky-gem fejlede (ofte manglende/opdaterede Firestore-regler). Tjek `users/{uid}/routes`-regler og netværk.",
+          );
+        }
       })();
     }, 900);
     return () => window.clearTimeout(t);
@@ -527,6 +646,33 @@ export default function App() {
     });
   }, []);
 
+  const flushActiveRouteToCloud = useCallback(async (): Promise<boolean> => {
+    if (!hydrated || !firebaseUid || !activeFirestoreRouteId) return true;
+    const rd =
+      routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
+        ? routeDate
+        : todayIsoLocal();
+    const nm = routeName.trim() || routeTitleFromStops(stops);
+    return saveUserRoute(firebaseUid, activeFirestoreRouteId, {
+      name: nm,
+      title: routeTitleFromStops(stops),
+      routeName: routeName.trim(),
+      routeDate: rd,
+      rawInput,
+      stops,
+      activeStopId: activeId,
+    });
+  }, [
+    hydrated,
+    firebaseUid,
+    activeFirestoreRouteId,
+    routeDate,
+    routeName,
+    stops,
+    rawInput,
+    activeId,
+  ]);
+
   const handleParse = () => {
     setCopiedStopId(null);
     setRouteOptimizeFeedback(null);
@@ -545,6 +691,7 @@ export default function App() {
           ? routeDate
           : todayIsoLocal();
       void saveUserRoute(firebaseUid, rid, {
+        name: routeName.trim() || routeTitleFromStops(next),
         title: routeTitleFromStops(next),
         routeName: routeName.trim(),
         routeDate: rd,
@@ -555,38 +702,38 @@ export default function App() {
     }
   };
 
-  /** Ny dokument-række under «Tidligere ruter» (samme indhold som nu er ok). */
-  const handleParseAsNewCloudRoute = () => {
+  /** Ny række i sky-listen — gemmer nuværende `stops` uden at parse tekst igen. */
+  const handleSaveAsNewCloudRoute = () => {
     setCopiedStopId(null);
     setRouteOptimizeFeedback(null);
     setOpenRouteDriveKm(null);
-    const parsed = parseDanishAddresses(rawInput);
-    const next = stopsFromParsed(parsed);
-    setStops(next);
-    ensureActive(next);
-    if (next.length === 0) return;
+    if (stops.length === 0) {
+      setCloudMessage(
+        "Du har ingen stop at gemme — indlæs adresser først, eller tilføj stop.",
+      );
+      return;
+    }
     if (!firebaseUid) {
       if (isFirestoreConfigured()) {
-        setCloudMessage(
-          "Skyen er ikke klar — vent et øjeblik, eller tryk «Genindlæs ruter» i menuen.",
-        );
+        setCloudMessage("Log ind med Google for at gemme ruten i skyen.");
       }
       return;
     }
     const rid = newId();
     setActiveFirestoreRouteId(rid);
     const firstOpen =
-      next.find((s) => !s.completed)?.id ?? next[0]?.id ?? null;
+      stops.find((s) => !s.completed)?.id ?? stops[0]?.id ?? null;
     const rd =
       routeDate && /^\d{4}-\d{2}-\d{2}$/.test(routeDate)
         ? routeDate
         : todayIsoLocal();
     void saveUserRoute(firebaseUid, rid, {
-      title: routeTitleFromStops(next),
+      name: "Ny rute",
+      title: routeTitleFromStops(stops),
       routeName: routeName.trim(),
       routeDate: rd,
       rawInput,
-      stops: next,
+      stops,
       activeStopId: firstOpen,
     });
   };
@@ -605,7 +752,7 @@ export default function App() {
       setOpenRouteDriveKm(null);
       setRawInput(data.rawInput);
       setStops(data.stops as Stop[]);
-      setRouteName(data.routeName ?? "");
+      setRouteName(primaryRouteLabelFromPayload(data));
       setRouteDate(
         data.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(data.routeDate)
           ? data.routeDate
@@ -626,10 +773,25 @@ export default function App() {
     [firebaseUid],
   );
 
-  const goHome = useCallback(() => {
+  const goHome = useCallback(async () => {
     setMenuOpen(false);
+    if (hydrated && firebaseUid && activeFirestoreRouteId) {
+      setCloudSyncPhase("syncing");
+      const ok = await flushActiveRouteToCloud();
+      setCloudSyncPhase(ok ? "synced" : "error");
+      if (!ok) {
+        setCloudMessage(
+          "Kunne ikke gemme til skyen før forsiden — prøv igen om et øjeblik.",
+        );
+      }
+    }
     setScreen("home");
-  }, []);
+  }, [
+    hydrated,
+    firebaseUid,
+    activeFirestoreRouteId,
+    flushActiveRouteToCloud,
+  ]);
 
   const startNewActiveRoute = useCallback(() => {
     setCopiedStopId(null);
@@ -865,7 +1027,7 @@ export default function App() {
     if (!firebaseUid) {
       return (
         <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">
-          Forbinder til skyen…
+          Log ind med Google for at gemme denne rute i skyen.
         </p>
       );
     }
@@ -939,16 +1101,31 @@ export default function App() {
                   Forside — vælg gemt rute eller opret ny
                 </p>
               </div>
-              <button
-                type="button"
-                aria-expanded={menuOpen}
-                aria-controls="app-drawer-menu"
-                onClick={() => setMenuOpen((o) => !o)}
-                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
-              >
-                <span className="sr-only">Menu</span>
-                <IconMenu />
-              </button>
+              <div className="flex shrink-0 items-start gap-2">
+                {isFirestoreConfigured() && !firebaseUid ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void signInWithGoogle().then(({ errorMessage }) => {
+                        if (errorMessage) setCloudMessage(errorMessage);
+                      })
+                    }
+                    className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-3 py-2 text-xs font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                  >
+                    Log ind
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  aria-expanded={menuOpen}
+                  aria-controls="app-drawer-menu"
+                  onClick={() => setMenuOpen((o) => !o)}
+                  className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  <span className="sr-only">Menu</span>
+                  <IconMenu />
+                </button>
+              </div>
             </div>
           </div>
         </header>
@@ -958,7 +1135,7 @@ export default function App() {
             <div className="flex items-start gap-2">
               <button
                 type="button"
-                onClick={goHome}
+                onClick={() => void goHome()}
                 className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
                 aria-label="Tilbage til forsiden"
               >
@@ -980,16 +1157,31 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
-              <button
-                type="button"
-                aria-expanded={menuOpen}
-                aria-controls="app-drawer-menu"
-                onClick={() => setMenuOpen((o) => !o)}
-                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
-              >
-                <span className="sr-only">Menu</span>
-                <IconMenu />
-              </button>
+              <div className="flex shrink-0 items-start gap-2">
+                {isFirestoreConfigured() && !firebaseUid ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void signInWithGoogle().then(({ errorMessage }) => {
+                        if (errorMessage) setCloudMessage(errorMessage);
+                      })
+                    }
+                    className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-3 py-2 text-xs font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                  >
+                    Log ind
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  aria-expanded={menuOpen}
+                  aria-controls="app-drawer-menu"
+                  onClick={() => setMenuOpen((o) => !o)}
+                  className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  <span className="sr-only">Menu</span>
+                  <IconMenu />
+                </button>
+              </div>
             </div>
             <p className="text-base font-black text-accent dark:drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
               TOTAL: {completedCount} / {total} pakker
@@ -1118,7 +1310,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setMenuOpen(false);
-                    goHome();
+                    void goHome();
                   }}
                   className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-3 text-left text-sm font-extrabold text-zinc-900 dark:border-white/30 dark:bg-slate-800 dark:text-white"
                 >
@@ -1132,6 +1324,13 @@ export default function App() {
 
               {firebaseUid ? (
                 <>
+                  <button
+                    type="button"
+                    onClick={() => void signOutUser()}
+                    className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-50 px-4 py-2 text-left text-xs font-bold text-zinc-700 dark:border-white/30 dark:bg-slate-800 dark:text-zinc-200"
+                  >
+                    Log ud
+                  </button>
                   <button
                     type="button"
                     disabled={routesRefreshing}
@@ -1169,9 +1368,22 @@ export default function App() {
                   ) : null}
                 </>
               ) : isFirestoreConfigured() ? (
-                <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-                  Logger ind i skyen… hvis det hænger, genindlæs siden.
-                </p>
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Log ind med Google for at synkronisere ruter.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void signInWithGoogle().then(({ errorMessage }) => {
+                        if (errorMessage) setCloudMessage(errorMessage);
+                      })
+                    }
+                    className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 py-2.5 text-left text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                  >
+                    Log ind med Google
+                  </button>
+                </div>
               ) : null}
             </div>
           </aside>
@@ -1247,7 +1459,7 @@ export default function App() {
                     {savedRoutes.map((r) => {
                       const isActive = r.id === activeFirestoreRouteId;
                       const headline =
-                        r.routeName.trim() || r.title || "Rute";
+                        r.name.trim() || r.routeName.trim() || r.title || "Rute";
                       const dateStr =
                         r.routeDate && /^\d{4}-\d{2}-\d{2}$/.test(r.routeDate)
                           ? formatRouteDateDa(r.routeDate)
@@ -1289,12 +1501,35 @@ export default function App() {
                 )}
               </>
             ) : isFirestoreConfigured() ? (
-              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-                Forbinder til skyen… genindlæs siden hvis listen ikke kommer.
-              </p>
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                  Log ind med Google for at se gemte ruter.
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void signInWithGoogle().then(({ errorMessage }) => {
+                      if (errorMessage) setCloudMessage(errorMessage);
+                    })
+                  }
+                  className="touch-manipulation rounded-xl border-2 border-accent bg-accent/90 px-4 py-3 text-sm font-extrabold text-black dark:border-accent dark:bg-accent/80"
+                >
+                  Log ind med Google
+                </button>
+              </div>
             ) : (
               <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-                Uden Firebase gemmes kun på denne enhed.
+                Denne side har ikke Firebase-nøgler i build-miljøet. Tilføj{" "}
+                <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">
+                  VITE_FIREBASE_API_KEY
+                </code>{" "}
+                og{" "}
+                <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">
+                  VITE_FIREBASE_PROJECT_ID
+                </code>{" "}
+                i <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">.env.local</code>{" "}
+                (lokalt) eller i hostens miljøvariabler, og kør <code className="rounded bg-zinc-200 px-1 dark:bg-slate-700">npm run build</code>{" "}
+                igen — ellers gemmes ruter kun lokalt.
               </p>
             )}
           </section>
@@ -1398,17 +1633,17 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={handleParseAsNewCloudRoute}
-            disabled={!rawInput.trim()}
-            title="Opretter en ny rute på forsiden (samme tekst som nu er ok)."
+            onClick={handleSaveAsNewCloudRoute}
+            disabled={stops.length === 0}
+            title="Gemmer den nuværende rute som et nyt dokument i sky-listen."
             className="w-full touch-manipulation rounded-xl border-2 border-dashed border-zinc-400 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/35 dark:bg-slate-800/80 dark:text-zinc-100"
           >
             Som ny rute i sky-listen
           </button>
           <p className="text-center text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
             «Indlæs adresser» opdaterer den <span className="font-semibold">aktive</span>{" "}
-            sky-rute. Brug knappen herover for en ekstra linje på forsiden (fx samme liste
-            som ny tur).
+            sky-rute. Knappen herunder gemmer <span className="font-semibold">nuværende stop</span>{" "}
+            som et nyt dokument («Ny rute») på forsiden.
           </p>
           <p className="text-center text-xs text-zinc-500 dark:text-zinc-500">
             {getDailyRouteUsageLabel()}

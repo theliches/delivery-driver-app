@@ -1,7 +1,9 @@
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
   getAuth,
-  signInAnonymously,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
   type Auth,
   type User,
 } from "firebase/auth";
@@ -18,13 +20,23 @@ export function isFirestoreConfigured(): boolean {
   );
 }
 
+function defaultAuthDomain(): string {
+  const pid = import.meta.env.VITE_FIREBASE_PROJECT_ID;
+  return typeof pid === "string" && pid
+    ? `${pid}.firebaseapp.com`
+    : "";
+}
+
 function ensureApp(): FirebaseApp | null {
   if (!isFirestoreConfigured()) return null;
   if (!app) {
+    const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID as string;
     app = initializeApp({
       apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "",
-      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+      authDomain:
+        (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string | undefined)
+          ?.trim() || defaultAuthDomain(),
+      projectId,
       storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
       messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
       appId: import.meta.env.VITE_FIREBASE_APP_ID,
@@ -46,18 +58,43 @@ export function getFirebaseAuth(): Auth | null {
   return auth;
 }
 
-/**
- * Anonym login så rutedata kan gemmes under users/{uid}/routes.
- * Kræver at Anonymous sign-in er slået til i Firebase Console → Authentication.
- */
-export async function ensureAnonUser(): Promise<User | null> {
+export function formatFirebaseAuthError(e: unknown): string {
+  if (e && typeof e === "object" && "code" in e) {
+    const c = String((e as { code?: string }).code);
+    if (c === "auth/popup-closed-by-user") {
+      return "Popup lukket før login — prøv igen.";
+    }
+    if (c === "auth/unauthorized-domain") {
+      return "Domænet er ikke godkendt: Firebase Console → Authentication → Settings → Authorized domains.";
+    }
+    if (c === "auth/operation-not-allowed") {
+      return "Google-login er ikke slået til i Firebase Console → Authentication.";
+    }
+    return `Login-fejl (${c}).`;
+  }
+  return "Login mislykkedes.";
+}
+
+export async function signInWithGoogle(): Promise<{
+  user: User | null;
+  errorMessage?: string;
+}> {
   const a = getFirebaseAuth();
-  if (!a) return null;
-  if (a.currentUser) return a.currentUser;
+  if (!a) return { user: null, errorMessage: "Firebase er ikke konfigureret i denne build." };
   try {
-    const cred = await signInAnonymously(a);
-    return cred.user;
+    const cred = await signInWithPopup(a, new GoogleAuthProvider());
+    return { user: cred.user };
+  } catch (e) {
+    return { user: null, errorMessage: formatFirebaseAuthError(e) };
+  }
+}
+
+export async function signOutUser(): Promise<void> {
+  const a = getFirebaseAuth();
+  if (!a) return;
+  try {
+    await signOut(a);
   } catch {
-    return null;
+    /* ignore */
   }
 }
