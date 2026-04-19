@@ -7,7 +7,13 @@ import {
 
 type Stop = ParsedAddress & { id: string; completed: boolean };
 
-type Cluster = { key: string; stops: Stop[] };
+type Cluster = { key: string; stops: Stop[]; minIndex?: number };
+
+export type StopListCitySection = {
+  sectionKey: string;
+  heading: string;
+  clusters: Cluster[];
+};
 
 function IconChevronUp() {
   return (
@@ -26,7 +32,8 @@ function IconChevronDown() {
 }
 
 export function EditorStopList(props: {
-  buildingClusters: Cluster[];
+  /** Stop grupperet efter by/postnr., med bygningsklynger inden for hver gruppe. */
+  sectionsByCity: StopListCitySection[];
   activeId: string | null;
   routeStepById: Map<string, number>;
   incompleteStops: Stop[];
@@ -40,7 +47,7 @@ export function EditorStopList(props: {
   copiedStopId: string | null;
 }) {
   const {
-    buildingClusters,
+    sectionsByCity,
     activeId,
     routeStepById,
     incompleteStops,
@@ -53,16 +60,25 @@ export function EditorStopList(props: {
 
   return (
     <section className="flex flex-col gap-4">
-      {buildingClusters.map(({ key, stops: cStops }) => {
+      {sectionsByCity.map((section) => {
+        const flat = section.clusters.flatMap((c) => c.stops);
+        const secDone = flat.filter((s) => s.completed).length;
+        const secTotal = flat.length;
+        return (
+          <div key={section.sectionKey}>
+            <h2 className="mb-2 text-sm font-extrabold uppercase tracking-wide text-zinc-700 drop-shadow-sm dark:text-zinc-300">
+              {section.heading} ({secDone}/{secTotal})
+            </h2>
+            <ul className="flex flex-col gap-3">
+              {section.clusters.map(({ key, stops: cStops }) => {
         const multi = cStops.length > 1;
         const done = cStops.filter((s) => s.completed).length;
         const clusterActive = cStops.some((s) => s.id === activeId);
         const head = cStops[0]!;
         return (
-          <div key={key}>
-            <ul className="flex flex-col gap-3">
               <li
-                className={`overflow-hidden rounded-2xl shadow-sm transition dark:shadow-card ${
+                key={`${section.sectionKey}::${key}`}
+                className={`list-none overflow-hidden rounded-2xl shadow-sm transition dark:shadow-card ${
                   clusterActive
                     ? "border-4 border-accent"
                     : "border-2 border-zinc-300 dark:border-white/35"
@@ -245,12 +261,14 @@ export function EditorStopList(props: {
                   );
                 })}
               </li>
+        );
+      })}
             </ul>
           </div>
         );
       })}
 
-      {buildingClusters.length === 0 ? (
+      {sectionsByCity.length === 0 ? (
         <p className="text-center text-base font-medium text-zinc-600 dark:text-zinc-400">
           Indsæt adresser og tryk &quot;Indlæs adresser&quot; — så er du i gang!
         </p>

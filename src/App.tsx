@@ -9,6 +9,7 @@ import {
 } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
+  cityBaseDisplay,
   formatAddressForNav,
   parseDanishAddresses,
   clusterStopsByBuildingForDisplay,
@@ -934,10 +935,43 @@ export default function App() {
     });
   }, []);
 
-  const buildingClusters = useMemo(
-    () => clusterStopsByBuildingForDisplay(stops),
-    [stops],
-  );
+  /** Grupperet efter postnr. + bynavn (som chauffører tænker geografisk). */
+  const stopSectionsByCity = useMemo(() => {
+    const sectionKey = (s: Stop) =>
+      `${s.zip}|${cityBaseDisplay(s.city)}`;
+    const order: string[] = [];
+    const seen = new Set<string>();
+    for (const s of stops) {
+      const k = sectionKey(s);
+      if (!seen.has(k)) {
+        seen.add(k);
+        order.push(k);
+      }
+    }
+    const byKey = new Map<string, Stop[]>();
+    for (const s of stops) {
+      const k = sectionKey(s);
+      const list = byKey.get(k) ?? [];
+      list.push(s);
+      byKey.set(k, list);
+    }
+    for (const k of order) {
+      const list = byKey.get(k)!;
+      list.sort((a, b) => {
+        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+        return stops.indexOf(a) - stops.indexOf(b);
+      });
+    }
+    return order.map((key) => {
+      const list = byKey.get(key)!;
+      const head = list[0]!;
+      return {
+        sectionKey: key,
+        heading: `${head.zip} ${cityBaseDisplay(head.city)}`,
+        clusters: clusterStopsByBuildingForDisplay(list),
+      };
+    });
+  }, [stops]);
 
   const navLabel = activeStop
     ? formatAddressForNav(activeStop)
@@ -1502,8 +1536,9 @@ export default function App() {
           </span>{" "}
           (OpenStreetMap) eller på et stop i listen for at vælge · derefter{" "}
           <span className="font-bold text-accent">NAVIGÉR</span>
-          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge. Flere leveringer
-          til samme hus vises som ét punkt med antal.
+          . Brug pile ↑ ↓ ved åbne stop for manuel rækkefølge. Listen er fordelt
+          under overskrifter pr. postnr. og by; flere leveringer til samme hus
+          vises som ét kort med antal.
         </p>
 
         {(stops.length > 0 || activeFirestoreRouteId != null) && (
@@ -1635,7 +1670,7 @@ export default function App() {
         </section>
 
         <EditorStopList
-          buildingClusters={buildingClusters}
+          sectionsByCity={stopSectionsByCity}
           activeId={activeId}
           routeStepById={routeStepById}
           incompleteStops={incompleteStops}
