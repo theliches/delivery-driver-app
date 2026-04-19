@@ -429,6 +429,10 @@ export default function App() {
   const [addressIconsByKey, setAddressIconsByKey] = useState<
     Record<string, AddressIconFlags>
   >(() => readAddressIconsLs());
+  /** Holder seneste kort så toggle kan beregne `next` og gemme før React kører setState-updater. */
+  const addressIconsByKeyRef = useRef(addressIconsByKey);
+  addressIconsByKeyRef.current = addressIconsByKey;
+
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -677,7 +681,11 @@ export default function App() {
     return subscribeAddressIconFlags(
       firebaseUid,
       (fromCloud) => {
-        setAddressIconsByKey((prev) => ({ ...prev, ...fromCloud }));
+        setAddressIconsByKey((prev) => {
+          const merged = { ...prev, ...fromCloud };
+          addressIconsByKeyRef.current = merged;
+          return merged;
+        });
       },
       () =>
         setCloudMessage(
@@ -1834,14 +1842,14 @@ export default function App() {
   const toggleAddressIcon = useCallback(
     (address: Stop, kind: AddressIconKind) => {
       const key = parsedAddressIconKey(address);
-      let nextFlags = DEFAULT_ADDRESS_ICON_FLAGS;
-      setAddressIconsByKey((prev) => {
-        const cur = prev[key] ?? DEFAULT_ADDRESS_ICON_FLAGS;
-        nextFlags = { ...cur, [kind]: !cur[kind] };
-        return { ...prev, [key]: nextFlags };
-      });
+      const prev = addressIconsByKeyRef.current;
+      const cur = prev[key] ?? DEFAULT_ADDRESS_ICON_FLAGS;
+      const next = { ...cur, [kind]: !cur[kind] };
+      const merged = { ...prev, [key]: next };
+      addressIconsByKeyRef.current = merged;
+      setAddressIconsByKey(merged);
       if (firebaseUid) {
-        void saveAddressIconFlags(firebaseUid, address, nextFlags);
+        void saveAddressIconFlags(firebaseUid, address, next);
       }
     },
     [firebaseUid],

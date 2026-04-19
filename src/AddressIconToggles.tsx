@@ -78,7 +78,7 @@ export function AddressIconToggles(props: {
       }}
       className={`flex h-11 w-11 touch-manipulation items-center justify-center rounded-xl border-2 transition active:scale-[0.95] disabled:cursor-not-allowed disabled:opacity-35 ${
         on
-          ? "border-accent bg-accent/25 shadow-sm dark:border-accent dark:bg-accent/15"
+          ? "border-accent bg-accent/40 shadow-md ring-2 ring-accent/50 ring-offset-2 ring-offset-zinc-100 dark:bg-accent/25 dark:ring-offset-slate-900"
           : "border-zinc-300 bg-zinc-100 dark:border-white/25 dark:bg-slate-800"
       }`}
     >
