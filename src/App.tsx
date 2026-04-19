@@ -16,12 +16,6 @@ import {
   type ParsedAddress,
 } from "./addressParser";
 import { EditorStopList } from "./EditorStopList";
-import {
-  canGenerateRouteToday,
-  recordRouteGenerated,
-  getDailyRouteUsageLabel,
-  DAILY_ROUTE_LIMIT,
-} from "./dailyRouteLimit";
 import { optimizeRouteWithStats } from "./routeOptimizer";
 import { copyTextToClipboard } from "./clipboardWrite";
 import { optimizeRouteByRoadWithStats } from "./roadRouting";
@@ -33,6 +27,7 @@ import {
   signOutUser,
 } from "./firebaseApp";
 import {
+  deleteUserRoute,
   fetchUserRoute,
   fetchUserRouteSummaries,
   formatDateTimeDdMmYyyyHm,
@@ -780,6 +775,31 @@ export default function App() {
     }
   }, [firebaseUid]);
 
+  const handleDeleteSavedRoute = useCallback(
+    async (r: SavedRouteSummary) => {
+      if (!firebaseUid) return;
+      const headline =
+        r.name.trim() || r.routeName.trim() || r.title || "Ruten";
+      if (
+        !window.confirm(
+          `Slet «${headline}» fra skyen?\n\nDu kan ikke fortryde.`,
+        )
+      ) {
+        return;
+      }
+      const ok = await deleteUserRoute(firebaseUid, r.id);
+      if (!ok) {
+        setCloudMessage("Kunne ikke slette ruten — prøv igen.");
+        return;
+      }
+      setCloudMessage(null);
+      if (activeFirestoreRouteId === r.id) {
+        startNewActiveRoute();
+      }
+    },
+    [firebaseUid, activeFirestoreRouteId, startNewActiveRoute],
+  );
+
   const handleOptimize = async () => {
     if (stops.length === 0) return;
     const incomplete = stops.filter((s) => !s.completed);
@@ -796,13 +816,6 @@ export default function App() {
     if (incomplete.length > MAX_STOPS_PER_ROUTE) {
       setRouteOptimizeFeedback(
         `Maximum ${MAX_STOPS_PER_ROUTE} stops allowed per route`,
-      );
-      return;
-    }
-
-    if (!canGenerateRouteToday()) {
-      setRouteOptimizeFeedback(
-        `Maksimum ${DAILY_ROUTE_LIMIT} ruteberegninger per dag — prøv igen i morgen.`,
       );
       return;
     }
@@ -863,7 +876,6 @@ export default function App() {
         ? "Nogle adresser brugte omtrentlige punkter (geokodning fejlede)."
         : "";
       applyRoadStats(ordered, stats, extra, anyApproxGeocode);
-      recordRouteGenerated();
     } catch {
       setRouteOptimizeFeedback(
         "Kunne ikke hente vejdata online — bruger luftlinje lokalt i stedet.",
@@ -879,7 +891,6 @@ export default function App() {
       setRouteOptimizeFeedback(
         `Offline/fallback: luftlinje ca. ${b} → ${a} km (ca. ${saved.toFixed(1)} km). Tilslut internet for rigtig kørevej.`,
       );
-      recordRouteGenerated();
     } finally {
       setOptimizing(false);
     }
@@ -1441,11 +1452,11 @@ export default function App() {
                         ? formatDateTimeDdMmYyyyHm(r.updatedAt)
                         : "";
                       return (
-                        <li key={r.id}>
+                        <li key={r.id} className="flex gap-2">
                           <button
                             type="button"
                             onClick={() => void loadSavedRouteIntoApp(r.id)}
-                            className={`flex w-full touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
+                            className={`flex min-w-0 flex-1 touch-manipulation flex-col gap-0.5 rounded-xl border-2 px-3 py-3 text-left transition ${
                               isActive
                                 ? "border-accent bg-accent/15 dark:bg-accent/10"
                                 : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
@@ -1466,6 +1477,14 @@ export default function App() {
                               {r.stopCount} stop
                               {when ? ` · opd. ${when}` : ""}
                             </span>
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Slet ruten ${headline}`}
+                            onClick={() => void handleDeleteSavedRoute(r)}
+                            className="shrink-0 touch-manipulation self-stretch rounded-xl border-2 border-red-300 bg-red-50 px-3 py-2 text-xs font-extrabold text-red-900 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-100"
+                          >
+                            Slet
                           </button>
                         </li>
                       );
@@ -1642,9 +1661,6 @@ export default function App() {
             «Indlæs adresser» opdaterer den <span className="font-semibold">aktive</span>{" "}
             sky-rute. Knappen herunder gemmer <span className="font-semibold">nuværende stop</span>{" "}
             som et nyt dokument («Ny rute») på forsiden.
-          </p>
-          <p className="text-center text-xs text-zinc-500 dark:text-zinc-500">
-            {getDailyRouteUsageLabel()}
           </p>
           {incompleteStops.length >= 2 && openRouteDriveKm != null && (
             <p className="text-center text-sm font-bold text-zinc-600 dark:text-zinc-400">

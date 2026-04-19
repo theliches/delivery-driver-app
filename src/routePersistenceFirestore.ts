@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -362,6 +363,29 @@ export async function saveUserRoute(
     return true;
   } catch (e) {
     logFirestoreError("saveUserRoute", path, e);
+    return false;
+  }
+}
+
+export async function deleteUserRoute(
+  uid: string,
+  routeId: string,
+): Promise<boolean> {
+  const authUid = getAuthenticatedUid(uid, "deleteUserRoute");
+  if (!authUid) return false;
+  const db = getFirestoreDb();
+  if (!db) {
+    console.warn(ROUTE_LOG, "NO_DB", { op: "deleteUserRoute" });
+    return false;
+  }
+  const path = routeDocumentPath(authUid, routeId);
+  const ref = routeDocRef(db, authUid, routeId);
+  try {
+    await deleteDoc(ref);
+    console.info(ROUTE_LOG, "deleteUserRoute ok", { uid: authUid, path });
+    return true;
+  } catch (e) {
+    logFirestoreError("deleteUserRoute", path, e);
     return false;
   }
 }
