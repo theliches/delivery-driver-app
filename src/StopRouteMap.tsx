@@ -107,9 +107,20 @@ export function StopRouteMap(props: {
   activeId: string | null;
   onSelectStop: (id: string) => void;
   accentHex: string;
+  /** `overview`: kun placering / indtastningsrækkefølge — ingen navigations-fokus. */
+  variant?: "route" | "overview";
+  /** CSS-værdi til korthøjde (fx `min(55vh, 420px)`). */
+  mapHeight?: string;
 }) {
-  const { stops, incompleteOrdered, activeId, onSelectStop, accentHex } =
-    props;
+  const {
+    stops,
+    incompleteOrdered,
+    activeId,
+    onSelectStop,
+    accentHex,
+    variant = "route",
+    mapHeight = "min(45vh, 320px)",
+  } = props;
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -238,7 +249,7 @@ export function StopRouteMap(props: {
         zoom={11}
         scrollWheelZoom
         className="z-0 w-full"
-        style={{ height: "min(45vh, 320px)", minHeight: 220 }}
+        style={{ height: mapHeight, minHeight: 220 }}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -278,9 +289,20 @@ export function StopRouteMap(props: {
         })}
       </MapContainer>
       <p className="border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] font-semibold leading-snug text-zinc-600 dark:border-white/15 dark:bg-slate-900 dark:text-zinc-400">
-        Punkter flytter sig kort efter indlæsning, når adresser hentes fra
-        OpenStreetMap. Ved samme hus ét punkt med antal; ellers kørerækkefølge
-        som tal. Tryk en markør for at vælge stop til NAVIGÉR.
+        {variant === "overview" ? (
+          <>
+            Kun oversigt: tal på kortet for åbne stop følger <span className="font-bold">indtastningsrækkefølgen</span>
+            blandt ikke-leverede. Brug <span className="font-bold">NAVIGÉR</span> og{" "}
+            <span className="font-bold">Leveret</span> på listen. Punkter justeres via
+            OpenStreetMap. Ved samme hus ét punkt med antal. Markør: fremhæv stop.
+          </>
+        ) : (
+          <>
+            Punkter flytter sig kort efter indlæsning, når adresser hentes fra
+            OpenStreetMap. Ved samme hus ét punkt med antal; ellers kørerækkefølge
+            som tal. Tryk en markør for at vælge stop til NAVIGÉR.
+          </>
+        )}
       </p>
     </div>
   );

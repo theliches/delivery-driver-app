@@ -72,6 +72,8 @@ function hexToRgbTriplet(hex: string): string {
 
 type CloudSyncPhase = "idle" | "pending" | "syncing" | "synced" | "error";
 
+type AppScreen = "home" | "editor" | "mapOverview";
+
 type Stop = ParsedAddress & {
   id: string;
   completed: boolean;
@@ -251,7 +253,12 @@ export default function App() {
   const [routeName, setRouteName] = useState("");
   const [routeDate, setRouteDate] = useState(() => todayIsoLocal());
   const [routesRefreshing, setRoutesRefreshing] = useState(false);
-  const [screen, setScreen] = useState<"home" | "editor">("home");
+  const [screen, setScreen] = useState<AppScreen>("home");
+  const [mapOverviewRawInput, setMapOverviewRawInput] = useState("");
+  const [mapOverviewStops, setMapOverviewStops] = useState<Stop[]>([]);
+  const [mapOverviewActiveId, setMapOverviewActiveId] = useState<string | null>(
+    null,
+  );
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     try {
       const t = localStorage.getItem(THEME_KEY);
@@ -594,6 +601,17 @@ export default function App() {
     });
   }, []);
 
+  const ensureMapOverviewActive = useCallback((next: Stop[]) => {
+    if (next.length === 0) {
+      setMapOverviewActiveId(null);
+      return;
+    }
+    setMapOverviewActiveId((cur) => {
+      if (cur && next.some((s) => s.id === cur)) return cur;
+      return next[0]!.id;
+    });
+  }, []);
+
   const flushActiveRouteToCloud = useCallback(async (): Promise<boolean> => {
     if (!hydrated || !firebaseUid || !activeFirestoreRouteId) return true;
     const rd =
@@ -620,6 +638,19 @@ export default function App() {
     rawInput,
     activeId,
   ]);
+
+  const handleMapOverviewParse = () => {
+    const parsed = parseDanishAddresses(mapOverviewRawInput);
+    const next = stopsFromParsed(parsed);
+    setMapOverviewStops(next);
+    ensureMapOverviewActive(next);
+  };
+
+  const handleMapOverviewClear = () => {
+    setMapOverviewRawInput("");
+    setMapOverviewStops([]);
+    setMapOverviewActiveId(null);
+  };
 
   const handleParse = () => {
     setCopiedStopId(null);
@@ -927,6 +958,12 @@ export default function App() {
     );
   };
 
+  const toggleMapOverviewComplete = useCallback((id: string) => {
+    setMapOverviewStops((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, completed: !s.completed } : s)),
+    );
+  }, []);
+
   const selectStop = (id: string) => setActiveId(id);
 
   const moveStopInRoute = useCallback((stopId: string, direction: "up" | "down") => {
@@ -991,6 +1028,11 @@ export default function App() {
   const incompleteStops = useMemo(
     () => stops.filter((s) => !s.completed),
     [stops],
+  );
+
+  const mapOverviewIncompleteStops = useMemo(
+    () => mapOverviewStops.filter((s) => !s.completed),
+    [mapOverviewStops],
   );
 
   const routeStepById = useMemo(() => {
@@ -1082,7 +1124,59 @@ export default function App() {
                   Leveringschauffør
                 </h1>
                 <p className="mt-1 text-sm font-semibold text-zinc-600 dark:text-zinc-400">
-                  Forside — vælg gemt rute eller opret ny
+                  Forside — vælg gemt rute, kortoversigt eller opret ny
+                </p>
+              </div>
+              <div className="flex shrink-0 items-start gap-2">
+                {isFirestoreConfigured() && !firebaseUid ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void signInWithGoogle().then(({ errorMessage }) => {
+                        if (errorMessage) setCloudMessage(errorMessage);
+                      })
+                    }
+                    className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-3 py-2 text-xs font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                  >
+                    Log ind
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  aria-expanded={menuOpen}
+                  aria-controls="app-drawer-menu"
+                  onClick={() => setMenuOpen((o) => !o)}
+                  className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  <span className="sr-only">Menu</span>
+                  <IconMenu />
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
+      ) : screen === "mapOverview" ? (
+        <header className="sticky top-0 z-20 border-b-2 border-zinc-300 bg-white shadow-lg dark:border-white/20 dark:bg-[#0a1522]">
+          <div className="mx-auto flex max-w-lg flex-col gap-2 px-4 py-3">
+            <div className="flex items-start gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setScreen("home");
+                }}
+                className="touch-manipulation shrink-0 rounded-xl border-2 border-zinc-300 bg-zinc-100 p-2.5 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                aria-label="Tilbage til forsiden"
+              >
+                <IconArrowLeft />
+              </button>
+              <div className="min-w-0 flex-1">
+                <h1 className="text-lg font-extrabold leading-tight text-zinc-900 dark:text-white">
+                  Kortoversigt
+                </h1>
+                <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                  Tekstfelt, liste med NAVIGÉR/Leveret og kort — gemmer ikke en sky-rute; brug
+                  «Opret ny rute» for levering.
                 </p>
               </div>
               <div className="flex shrink-0 items-start gap-2">
@@ -1300,9 +1394,21 @@ export default function App() {
                 >
                   Forside
                 </button>
+              ) : screen === "mapOverview" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setScreen("home");
+                  }}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-zinc-100 px-4 py-3 text-left text-sm font-extrabold text-zinc-900 dark:border-white/30 dark:bg-slate-800 dark:text-white"
+                >
+                  Forside
+                </button>
               ) : (
                 <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-                  Dine gemte ruter vises på forsiden. Brug «Opret ny rute» der.
+                  Dine gemte ruter vises på forsiden. Brug «Opret ny rute» eller «Kortoversigt»
+                  der.
                 </p>
               )}
 
@@ -1399,6 +1505,13 @@ export default function App() {
             className="min-h-[58px] w-full touch-manipulation rounded-2xl border-2 border-accentDeep bg-accent px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] dark:shadow-card"
           >
             Opret ny rute
+          </button>
+          <button
+            type="button"
+            onClick={() => setScreen("mapOverview")}
+            className="min-h-[52px] w-full touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+          >
+            Kortoversigt — kort, liste og navigation
           </button>
           {stops.length > 0 ? (
             <button
@@ -1525,6 +1638,133 @@ export default function App() {
               </p>
             )}
           </section>
+        </main>
+      ) : null}
+
+      {screen === "mapOverview" ? (
+        <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 px-4 pb-12 pt-4">
+          <section className="flex flex-col gap-2">
+            <label
+              className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
+              htmlFor="raw-map-overview"
+            >
+              Rå tekst — én adresse pr. linje (samme format som under rute).
+            </label>
+            <textarea
+              id="raw-map-overview"
+              value={mapOverviewRawInput}
+              onChange={(e) => setMapOverviewRawInput(e.target.value)}
+              rows={8}
+              className="touch-manipulation rounded-xl border-2 border-zinc-300 bg-white px-3 py-3 text-base text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 dark:border-white/30 dark:bg-slate-900 dark:text-white dark:placeholder:text-zinc-500 dark:shadow-card"
+              placeholder={
+                "1. Nørregade 15, 4000 Roskilde\n2. Hovedgaden 2, 5000 Odense"
+              }
+              spellCheck={false}
+            />
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleMapOverviewParse}
+                className="min-h-[56px] flex-1 touch-manipulation rounded-xl border-2 border-zinc-400 bg-accent px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] active:bg-accentDeep dark:border-white/40 dark:shadow-card"
+              >
+                Indlæs adresser
+              </button>
+              <button
+                type="button"
+                onClick={handleMapOverviewClear}
+                className="min-h-[56px] touch-manipulation rounded-xl border-2 border-zinc-300 px-4 text-sm font-bold text-zinc-600 dark:border-white/25 dark:text-zinc-400"
+              >
+                Ryd
+              </button>
+            </div>
+          </section>
+
+          {mapOverviewStops.length > 0 ? (
+            <section
+              className="flex flex-col gap-2"
+              aria-label="Rækkefølge som indtastet"
+            >
+              <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Rækkefølge (kun visning)
+              </h2>
+              <ol className="flex list-none flex-col gap-2 p-0">
+                {mapOverviewStops.map((s, index) => {
+                  const n = index + 1;
+                  const active = mapOverviewActiveId === s.id;
+                  return (
+                    <li
+                      key={s.id}
+                      className={`flex flex-col gap-3 rounded-xl border-2 px-3 py-3 ${
+                        active
+                          ? "border-accent bg-accent/15 dark:bg-accent/10"
+                          : "border-zinc-200 bg-zinc-50 dark:border-white/20 dark:bg-slate-800/80"
+                      } ${s.completed ? "opacity-[0.78] dark:opacity-[0.68]" : ""}`}
+                    >
+                      <div className="flex gap-3">
+                        <span
+                          className={`flex size-9 shrink-0 items-center justify-center rounded-full text-sm font-black ${
+                            active
+                              ? "bg-accent text-black"
+                              : "bg-zinc-200 text-zinc-800 dark:bg-slate-700 dark:text-zinc-100"
+                          }`}
+                          aria-hidden
+                        >
+                          {s.completed ? "✓" : n}
+                        </span>
+                        <p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-100">
+                          {formatAddressForNav(s)}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 border-t border-zinc-200 pt-3 dark:border-white/15">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openNativeNavigation(formatAddressForNav(s))
+                          }
+                          className="min-h-[48px] min-w-[8.5rem] flex-1 touch-manipulation rounded-xl border-2 border-accentDeep bg-accent px-3 text-sm font-black text-black shadow-sm transition active:scale-[0.98] dark:shadow-card sm:flex-initial"
+                        >
+                          NAVIGÉR
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleMapOverviewComplete(s.id)}
+                          aria-pressed={s.completed}
+                          className={`min-h-[48px] flex-1 touch-manipulation rounded-xl border-2 px-3 text-sm font-extrabold shadow-sm transition active:scale-[0.98] sm:max-w-[11rem] sm:flex-initial ${
+                            s.completed
+                              ? "border-accentDeep bg-accent text-black dark:border-accent"
+                              : "border-zinc-300 bg-zinc-200 text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                          }`}
+                        >
+                          {s.completed ? "Leveret!" : "Leveret"}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          ) : (
+            <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              Tryk «Indlæs adresser» for at se nummereret liste og kort.
+            </p>
+          )}
+
+          {mapOverviewStops.length > 0 ? (
+            <section className="flex flex-col gap-2" aria-label="Kort oversigt">
+              <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Kort — placering (samme rækkefølge som listen)
+              </h2>
+              <StopRouteMap
+                stops={mapOverviewStops}
+                incompleteOrdered={mapOverviewIncompleteStops}
+                activeId={mapOverviewActiveId}
+                onSelectStop={setMapOverviewActiveId}
+                accentHex={ACCENT_PRESETS[accentId].main}
+                variant="overview"
+                mapHeight="min(52vh, 440px)"
+              />
+            </section>
+          ) : null}
         </main>
       ) : null}
 
