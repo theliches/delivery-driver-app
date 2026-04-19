@@ -1222,7 +1222,7 @@ export default function App() {
                   Leveringschauffør
                 </h1>
                 <p className="mt-1 text-sm font-semibold text-zinc-600 dark:text-zinc-400">
-                  Forside — vælg gemt rute, kortoversigt eller opret ny
+                  Forside — vælg gemt rute eller opret ny · kortoversigt i menu
                 </p>
               </div>
               <div className="flex shrink-0 items-start gap-2">
@@ -1273,8 +1273,8 @@ export default function App() {
                   Kortoversigt
                 </h1>
                 <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  Tekstfelt, liste med NAVIGÉR/Leveret og kort — gemmer ikke en sky-rute; brug
-                  «Opret ny rute» for levering.
+                  Kort øverst, derefter tekstfelt og liste (NAVIGÉR/Leveret) — gemmer ikke en
+                  sky-rute; brug «Opret ny rute» for levering.
                 </p>
               </div>
               <div className="flex shrink-0 items-start gap-2">
@@ -1481,6 +1481,19 @@ export default function App() {
                 </p>
               ) : null}
 
+              {screen === "home" || screen === "editor" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setScreen("mapOverview");
+                  }}
+                  className="touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 py-3 text-left text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
+                >
+                  Kortoversigt
+                </button>
+              ) : null}
+
               {screen === "editor" ? (
                 <button
                   type="button"
@@ -1505,8 +1518,8 @@ export default function App() {
                 </button>
               ) : (
                 <p className="text-xs font-medium leading-snug text-zinc-500 dark:text-zinc-500">
-                  Dine gemte ruter vises på forsiden. Brug «Opret ny rute» eller «Kortoversigt»
-                  der.
+                  Dine gemte ruter vises på forsiden. Brug «Opret ny rute» der — eller «Kortoversigt»
+                  herover.
                 </p>
               )}
 
@@ -1603,13 +1616,6 @@ export default function App() {
             className="min-h-[58px] w-full touch-manipulation rounded-2xl border-2 border-accentDeep bg-accent px-4 text-base font-extrabold text-black shadow-sm transition active:scale-[0.98] dark:shadow-card"
           >
             Opret ny rute
-          </button>
-          <button
-            type="button"
-            onClick={() => setScreen("mapOverview")}
-            className="min-h-[52px] w-full touch-manipulation rounded-xl border-2 border-zinc-400 bg-white px-4 text-sm font-extrabold text-zinc-900 dark:border-white/35 dark:bg-slate-800 dark:text-white"
-          >
-            Kortoversigt — kort, liste og navigation
           </button>
           {stops.length > 0 ? (
             <button
@@ -1741,6 +1747,21 @@ export default function App() {
 
       {screen === "mapOverview" ? (
         <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 px-4 pb-12 pt-4">
+          <section className="flex flex-col gap-2" aria-label="Kort">
+            <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Kort
+            </h2>
+            <StopRouteMap
+              stops={mapOverviewStops}
+              incompleteOrdered={mapOverviewIncompleteStops}
+              activeId={mapOverviewActiveId}
+              onSelectStop={setMapOverviewActiveId}
+              accentHex={ACCENT_PRESETS[accentId].main}
+              variant="overview"
+              mapHeight="min(52vh, 440px)"
+            />
+          </section>
+
           <section className="flex flex-col gap-2">
             <label
               className="text-sm font-semibold text-zinc-700 dark:text-zinc-300"
@@ -1843,26 +1864,10 @@ export default function App() {
             </section>
           ) : (
             <p className="text-center text-sm font-medium text-zinc-600 dark:text-zinc-400">
-              Tryk «Indlæs adresser» for at se nummereret liste og kort.
+              Indsæt adresser og tryk «Indlæs adresser» for nummereret liste — kortet opdateres
+              ovenfor.
             </p>
           )}
-
-          {mapOverviewStops.length > 0 ? (
-            <section className="flex flex-col gap-2" aria-label="Kort oversigt">
-              <h2 className="text-xs font-black uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                Kort — placering (samme rækkefølge som listen)
-              </h2>
-              <StopRouteMap
-                stops={mapOverviewStops}
-                incompleteOrdered={mapOverviewIncompleteStops}
-                activeId={mapOverviewActiveId}
-                onSelectStop={setMapOverviewActiveId}
-                accentHex={ACCENT_PRESETS[accentId].main}
-                variant="overview"
-                mapHeight="min(52vh, 440px)"
-              />
-            </section>
-          ) : null}
         </main>
       ) : null}
 
